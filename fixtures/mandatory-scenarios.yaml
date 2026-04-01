@@ -1,0 +1,48 @@
+scenarios:
+  - id: "publish-rce-trusted-poc"
+    title: "High or Critical unauthenticated RCE with trusted PoC"
+    expected_outcome: "publish"
+    assertions:
+      - "deterministic classifier produces enterprise-eligible candidate"
+      - "poc_status is positive with trusted source confidence"
+      - "publish pipeline emits one initial publication event"
+
+  - id: "suppress-consumer-router"
+    title: "Critical consumer router CVE"
+    expected_outcome: "suppress"
+    assertions:
+      - "consumer-only deny reason code is present"
+      - "AI is skipped or ignored for final policy resolution"
+      - "no publish event is recorded"
+
+  - id: "ambiguous-enterprise-ai-route"
+    title: "High enterprise product with unknown relevance"
+    expected_outcome: "policy_resolved_after_ai"
+    assertions:
+      - "case routes to AI because deterministic outcome is ambiguous"
+      - "AI response passes schema validation"
+      - "final policy decision is stored with advisory usage flag"
+
+  - id: "published-then-kev-update"
+    title: "Previously published CVE later gains KEV or ITW evidence"
+    expected_outcome: "update"
+    assertions:
+      - "existing publication state is found"
+      - "material-change comparator flags evidence delta"
+      - "update publication event is recorded without duplicate initial post"
+
+  - id: "dedup-ingest-and-publish"
+    title: "Duplicate ingestion and duplicate publish attempt"
+    expected_outcome: "single_publish_event"
+    assertions:
+      - "re-ingest is idempotent"
+      - "content hash and state checks prevent duplicate publish"
+      - "audit trail contains duplicate suppression reason"
+
+  - id: "deterministic-deny-beats-ai"
+    title: "AI recommends publish but deterministic deny remains final"
+    expected_outcome: "suppress"
+    assertions:
+      - "consumer-only deny reason code remains present"
+      - "AI advisory is recorded but cannot override policy"
+      - "conflict resolution event captures final suppress outcome"

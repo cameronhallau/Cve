@@ -1,0 +1,53 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://example.local/schemas/ai-review-response.schema.json",
+  "title": "AIReviewResponse",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "cve_id",
+    "enterprise_relevance_assessment",
+    "exploit_path_assessment",
+    "confidence",
+    "reasoning_summary"
+  ],
+  "properties": {
+    "cve_id": {
+      "type": "string",
+      "pattern": "^CVE-[0-9]{4}-[0-9]{4,}$"
+    },
+    "enterprise_relevance_assessment": {
+      "type": "string",
+      "enum": [
+        "enterprise_relevant",
+        "enterprise_unlikely",
+        "unknown"
+      ]
+    },
+    "exploit_path_assessment": {
+      "type": "string",
+      "enum": [
+        "internet_exploitable",
+        "adjacent_or_authenticated",
+        "unclear"
+      ]
+    },
+    "confidence": {
+      "type": "number",
+      "minimum": 0,
+      "maximum": 1
+    },
+    "reasoning_summary": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 2000
+    },
+    "requested_at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "model": {
+      "type": "string"
+    }
+  }
+}
