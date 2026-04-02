@@ -26,6 +26,8 @@ def refresh_stale_evidence_job(
     *,
     evaluated_at: str | datetime | None = None,
     limit: int | None = None,
+    publish_target_name: str | None = None,
+    publish_target_behavior: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     settings = get_settings()
     engine = create_engine(
@@ -34,13 +36,29 @@ def refresh_stale_evidence_job(
         connect_args={"connect_timeout": int(settings.health_timeout_seconds)},
     )
     session_factory = create_session_factory(engine)
+    redis_client: Redis | None = None
 
     try:
+        publish_producer = None
+        if publish_target_name is not None:
+            redis_client = Redis.from_url(
+                settings.redis_url,
+                socket_connect_timeout=settings.health_timeout_seconds,
+                socket_timeout=settings.health_timeout_seconds,
+                decode_responses=False,
+            )
+            publish_producer = RQPublishJobProducer(
+                Queue(name=_resolve_current_queue_name(settings.rq_queue_name), connection=redis_client),
+                database_url=database_url or settings.database_url,
+                publish_target_name=publish_target_name,
+                publish_target_behavior=publish_target_behavior,
+            )
         with session_scope(session_factory) as session:
             result = refresh_stale_evidence(
                 session,
                 evaluated_at=_coerce_datetime(evaluated_at),
                 limit=limit,
+                publish_producer=publish_producer,
             )
         return {
             "status": "processed",
@@ -50,6 +68,8 @@ def refresh_stale_evidence_job(
             "cve_ids": list(result.cve_ids),
         }
     finally:
+        if redis_client is not None:
+            redis_client.close()
         engine.dispose()
 
 

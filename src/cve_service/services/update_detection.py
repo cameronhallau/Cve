@@ -474,6 +474,7 @@ def _extract_published_state_snapshot(publication_event: PublicationEvent) -> di
     replay_context = payload_snapshot.get("replay_context", {})
     publish_metadata = payload_snapshot.get("publish_content", {}).get("metadata", {})
     published_evidence = (replay_context.get("policy_decision") or {}).get("inputs_snapshot", {}).get("evidence", {})
+    current_update_evidence = publish_metadata.get("current_evidence", {})
     published_policy = replay_context.get("policy_decision", {})
     published_cve = replay_context.get("cve", {})
     published_classification = replay_context.get("classification", {})
@@ -513,12 +514,36 @@ def _extract_published_state_snapshot(publication_event: PublicationEvent) -> di
         },
         "evidence": {
             "poc": {
-                "status": published_evidence.get("poc_status", publish_metadata.get("poc_status")),
-                "confidence": published_evidence.get("poc_confidence", publish_metadata.get("poc_confidence")),
+                "status": _resolve_published_signal_value(
+                    published_evidence,
+                    current_update_evidence,
+                    signal_name="poc",
+                    field_name="status",
+                    fallback=publish_metadata.get("poc_status"),
+                ),
+                "confidence": _resolve_published_signal_value(
+                    published_evidence,
+                    current_update_evidence,
+                    signal_name="poc",
+                    field_name="confidence",
+                    fallback=publish_metadata.get("poc_confidence"),
+                ),
             },
             "itw": {
-                "status": published_evidence.get("itw_status", publish_metadata.get("itw_status")),
-                "confidence": published_evidence.get("itw_confidence", publish_metadata.get("itw_confidence")),
+                "status": _resolve_published_signal_value(
+                    published_evidence,
+                    current_update_evidence,
+                    signal_name="itw",
+                    field_name="status",
+                    fallback=publish_metadata.get("itw_status"),
+                ),
+                "confidence": _resolve_published_signal_value(
+                    published_evidence,
+                    current_update_evidence,
+                    signal_name="itw",
+                    field_name="confidence",
+                    fallback=publish_metadata.get("itw_confidence"),
+                ),
             },
         },
     }
@@ -548,6 +573,25 @@ def _serialize_delta(change: StateDelta) -> dict[str, Any]:
         "reason_code": change.reason_code,
         "explanation": change.explanation,
     }
+
+
+def _resolve_published_signal_value(
+    published_evidence: dict[str, Any],
+    current_update_evidence: dict[str, Any],
+    *,
+    signal_name: str,
+    field_name: str,
+    fallback: Any,
+) -> Any:
+    current_signal = current_update_evidence.get(signal_name, {})
+    if isinstance(current_signal, dict):
+        current_value = current_signal.get(field_name)
+        if current_value is not None:
+            return current_value
+    published_value = published_evidence.get(f"{signal_name}_{field_name}")
+    if published_value is not None:
+        return published_value
+    return fallback
 
 
 def _as_signal_record(evidence: Evidence) -> SignalEvidenceRecord:
