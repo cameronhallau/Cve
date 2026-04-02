@@ -21,6 +21,7 @@ from cve_service.models.entities import (
     PublicationEvent,
 )
 from cve_service.models.enums import PublicationEventStatus
+from cve_service.services.publication import X_PUBLICATION_METRIC_KEY
 
 ALERT_RULE_VERSION = "phase5-alert-rules.v1"
 AI_SCHEMA_VALIDATION_METRIC_KEY = "phase5.ai_review.validation.total"
@@ -37,17 +38,25 @@ AI_SCHEMA_INVALID_MINIMUM = 2
 AI_SCHEMA_INVALID_RATIO_THRESHOLD = 0.5
 SOURCE_ERROR_BUDGET_LOOKBACK = timedelta(hours=24)
 SOURCE_ERROR_BUDGET_AFFECTED_CVE_THRESHOLD = 2
+X_PUBLISH_FAILURE_LOOKBACK = timedelta(hours=1)
+X_RATE_LIMIT_LOOKBACK = timedelta(minutes=30)
 
 RULE_INGEST_FRESHNESS = "phase5.ingest_freshness_breach"
 RULE_DUPLICATE_PUBLISH_GUARD = "phase5.duplicate_publish_guard_breach"
 RULE_AI_SCHEMA_FAILURE = "phase5.ai_schema_validation_failure_spike"
 RULE_SOURCE_ERROR_BUDGET = "phase5.source_failure_error_budget_breach"
+RULE_X_PUBLISH_FAILURE = "phase6.x_publish_failure_breach"
+RULE_X_RATE_LIMIT = "phase6.x_publish_rate_limit_breach"
+RULE_X_RECONCILIATION_REQUIRED = "phase6.x_publish_reconciliation_required"
 
 MANAGED_RULE_KEYS = {
     RULE_INGEST_FRESHNESS,
     RULE_DUPLICATE_PUBLISH_GUARD,
     RULE_AI_SCHEMA_FAILURE,
     RULE_SOURCE_ERROR_BUDGET,
+    RULE_X_PUBLISH_FAILURE,
+    RULE_X_RATE_LIMIT,
+    RULE_X_RECONCILIATION_REQUIRED,
 }
 
 
@@ -88,6 +97,9 @@ def evaluate_operational_alerts(
             + _evaluate_duplicate_publish_guard_alerts(session, effective_evaluated_at)
             + _evaluate_ai_schema_validation_alerts(session, effective_evaluated_at, metric_index)
             + _evaluate_source_error_budget_alerts(session, effective_evaluated_at, metric_index)
+            + _evaluate_x_publish_failure_alerts(session, effective_evaluated_at, metric_index)
+            + _evaluate_x_rate_limit_alerts(session, effective_evaluated_at, metric_index)
+            + _evaluate_x_reconciliation_alerts(session, effective_evaluated_at, metric_index)
         )
     }
     existing_states = {
@@ -421,6 +433,150 @@ def _evaluate_source_error_budget_alerts(
     return conditions
 
 
+def _evaluate_x_publish_failure_alerts(
+    session: Session,
+    evaluated_at: datetime,
+    metric_index: dict[str, list[OperationalMetric]],
+) -> list[AlertCondition]:
+    window_start = evaluated_at - X_PUBLISH_FAILURE_LOOKBACK
+    rows = session.execute(
+        select(CVE.cve_id, PublicationEvent)
+        .join(CVE, PublicationEvent.cve_id == CVE.id)
+        .where(
+            PublicationEvent.destination == "x",
+            PublicationEvent.status == PublicationEventStatus.FAILED,
+            PublicationEvent.last_attempted_at.is_not(None),
+            PublicationEvent.last_attempted_at >= window_start,
+        )
+        .order_by(PublicationEvent.last_attempted_at.asc(), PublicationEvent.id.asc())
+    ).all()
+    failed_events = [
+        (public_cve_id, event)
+        for public_cve_id, event in rows
+        if not bool((event.target_response or {}).get("rate_limited"))
+        and not bool((event.target_response or {}).get("requires_reconciliation"))
+    ]
+    if not failed_events:
+        return []
+    return [
+        AlertCondition(
+            alert_key=_build_alert_key(RULE_X_PUBLISH_FAILURE, "system"),
+            rule_key=RULE_X_PUBLISH_FAILURE,
+            scope_key="system",
+            severity="ERROR",
+            contract_key="x_publish_delivery",
+            title="X Publish Failure Breach",
+            summary=f"{len(failed_events)} X publish attempts failed in the last hour.",
+            runbook_path="runbooks/publish-failure.md",
+            payload={
+                "lookback_seconds": int(X_PUBLISH_FAILURE_LOOKBACK.total_seconds()),
+                "failed_event_ids": [str(event.id) for _, event in failed_events],
+                "affected_cve_ids": sorted({public_cve_id for public_cve_id, _ in failed_events}),
+                "failure_categories": sorted(
+                    {
+                        str((event.target_response or {}).get("failure_category") or "unknown")
+                        for _, event in failed_events
+                    }
+                ),
+                "metric_totals": _serialize_metric_rows(metric_index.get(X_PUBLICATION_METRIC_KEY, [])),
+            },
+        )
+    ]
+
+
+def _evaluate_x_rate_limit_alerts(
+    session: Session,
+    evaluated_at: datetime,
+    metric_index: dict[str, list[OperationalMetric]],
+) -> list[AlertCondition]:
+    window_start = evaluated_at - X_RATE_LIMIT_LOOKBACK
+    rows = session.execute(
+        select(CVE.cve_id, PublicationEvent)
+        .join(CVE, PublicationEvent.cve_id == CVE.id)
+        .where(
+            PublicationEvent.destination == "x",
+            PublicationEvent.status == PublicationEventStatus.FAILED,
+            PublicationEvent.last_attempted_at.is_not(None),
+            PublicationEvent.last_attempted_at >= window_start,
+        )
+        .order_by(PublicationEvent.last_attempted_at.asc(), PublicationEvent.id.asc())
+    ).all()
+    rate_limited_events = [
+        (public_cve_id, event)
+        for public_cve_id, event in rows
+        if bool((event.target_response or {}).get("rate_limited"))
+    ]
+    if not rate_limited_events:
+        return []
+    return [
+        AlertCondition(
+            alert_key=_build_alert_key(RULE_X_RATE_LIMIT, "system"),
+            rule_key=RULE_X_RATE_LIMIT,
+            scope_key="system",
+            severity="ERROR",
+            contract_key="x_publish_rate_limit",
+            title="X Publish Rate Limit Breach",
+            summary=f"X returned rate limits for {len(rate_limited_events)} publish attempts in the last 30 minutes.",
+            runbook_path="runbooks/publish-failure.md",
+            payload={
+                "lookback_seconds": int(X_RATE_LIMIT_LOOKBACK.total_seconds()),
+                "rate_limited_event_ids": [str(event.id) for _, event in rate_limited_events],
+                "affected_cve_ids": sorted({public_cve_id for public_cve_id, _ in rate_limited_events}),
+                "latest_retry_after_seconds": max(
+                    int((event.target_response or {}).get("retry_after_seconds") or 0) for _, event in rate_limited_events
+                ),
+                "metric_totals": _serialize_metric_rows(metric_index.get(X_PUBLICATION_METRIC_KEY, [])),
+            },
+        )
+    ]
+
+
+def _evaluate_x_reconciliation_alerts(
+    session: Session,
+    evaluated_at: datetime,
+    metric_index: dict[str, list[OperationalMetric]],
+) -> list[AlertCondition]:
+    rows = session.execute(
+        select(CVE.cve_id, PublicationEvent)
+        .join(CVE, PublicationEvent.cve_id == CVE.id)
+        .where(
+            PublicationEvent.destination == "x",
+            PublicationEvent.status == PublicationEventStatus.FAILED,
+        )
+        .order_by(PublicationEvent.last_attempted_at.asc(), PublicationEvent.id.asc())
+    ).all()
+    conditions: list[AlertCondition] = []
+    for public_cve_id, event in rows:
+        if not bool((event.target_response or {}).get("requires_reconciliation")):
+            continue
+        scope_key = f"publication_event:{event.id}"
+        conditions.append(
+            AlertCondition(
+                alert_key=_build_alert_key(RULE_X_RECONCILIATION_REQUIRED, scope_key),
+                rule_key=RULE_X_RECONCILIATION_REQUIRED,
+                scope_key=scope_key,
+                severity="CRITICAL",
+                contract_key="x_publish_reconciliation",
+                title="X Publish Reconciliation Required",
+                summary=(
+                    f"{public_cve_id} has an X publication event that must be reconciled before retries continue."
+                ),
+                runbook_path="runbooks/publish-failure.md",
+                payload={
+                    "cve_id": public_cve_id,
+                    "publication_event_id": str(event.id),
+                    "external_id": event.external_id,
+                    "failure_category": (event.target_response or {}).get("failure_category"),
+                    "last_attempted_at": _serialize_datetime(event.last_attempted_at),
+                    "target_response": dict(event.target_response or {}),
+                    "metric_totals": _serialize_metric_rows(metric_index.get(X_PUBLICATION_METRIC_KEY, [])),
+                    "evaluated_at": evaluated_at.isoformat(),
+                },
+            )
+        )
+    return conditions
+
+
 def _load_metric_index(session: Session) -> dict[str, list[OperationalMetric]]:
     metric_rows = session.scalars(
         select(OperationalMetric).where(
@@ -428,6 +584,7 @@ def _load_metric_index(session: Session) -> dict[str, list[OperationalMetric]]:
                 (
                     AI_SCHEMA_VALIDATION_METRIC_KEY,
                     STALE_REFRESH_METRIC_KEY,
+                    X_PUBLICATION_METRIC_KEY,
                 )
             )
         )

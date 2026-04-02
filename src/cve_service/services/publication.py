@@ -32,12 +32,13 @@ from cve_service.services.publish_content import (
     build_initial_publish_content,
     build_update_publish_content,
 )
-from cve_service.services.publish_targets import PublishRequest, PublishTarget
+from cve_service.services.publish_targets import PublishRequest, PublishTarget, PublishTargetError
 from cve_service.services.state_machine import InvalidStateTransition, guard_transition
 
 PUBLICATION_EVENT_SCHEMA_VERSION = "phase4-publication-event.v1"
 UPDATE_PUBLICATION_EVENT_SCHEMA_VERSION = "phase5-update-publication-event.v1"
 UPDATE_PUBLICATION_METRIC_KEY = "phase5.update_publication.outcomes.total"
+X_PUBLICATION_METRIC_KEY = "phase6.x_publication.outcomes.total"
 
 
 @dataclass(frozen=True, slots=True)
@@ -74,9 +75,14 @@ class PublicationResult:
     idempotency_key: str
     published: bool
     duplicate_blocked: bool
+    retry_blocked: bool
     reused_event: bool
     attempt_count: int
     external_id: str | None
+    failure_category: str | None
+    retryable: bool
+    requires_reconciliation: bool
+    rate_limited: bool
 
 
 def prepare_publication(
@@ -341,9 +347,14 @@ def _publish_prepared(
             idempotency_key=successful_duplicate.idempotency_key,
             published=True,
             duplicate_blocked=True,
+            retry_blocked=False,
             reused_event=True,
             attempt_count=successful_duplicate.attempt_count,
             external_id=successful_duplicate.external_id,
+            failure_category=None,
+            retryable=False,
+            requires_reconciliation=False,
+            rate_limited=False,
         )
 
     event = _get_publication_event_by_idempotency(session, prepared.idempotency_key)
@@ -369,6 +380,67 @@ def _publish_prepared(
         )
         session.add(event)
         session.flush()
+    elif bool((event.target_response or {}).get("retry_blocked")):
+        _write_audit_event(
+            session,
+            cve=prepared.cve,
+            entity_id=event.id,
+            actor_type=actor_type,
+            event_type="publication.retry_blocked",
+            state_before=prepared.cve.state,
+            state_after=prepared.cve.state,
+            details=_publication_audit_details(
+                prepared=prepared,
+                details={
+                    "attempt_count": event.attempt_count,
+                    "external_id": event.external_id,
+                    "failure_category": event.target_response.get("failure_category"),
+                    "reused_event": reused_event,
+                },
+            ),
+        )
+        _record_target_publication_metric(
+            session,
+            prepared=prepared,
+            result="retry_blocked",
+            observed_at=effective_attempted_at,
+            event=event,
+            details={
+                "cve_id": prepared.cve.cve_id,
+                "publication_event_id": event.id,
+                "attempt_count": event.attempt_count,
+                "external_id": event.external_id,
+            },
+        )
+        from cve_service.services.alerting import evaluate_operational_alerts
+
+        evaluate_operational_alerts(
+            session,
+            evaluated_at=effective_attempted_at,
+            trigger="publication.retry_blocked",
+        )
+        session.flush()
+        return PublicationResult(
+            cve_id=prepared.cve.cve_id,
+            state=prepared.cve.state,
+            decision_id=prepared.decision.id if prepared.decision is not None else None,
+            event_id=event.id,
+            event_type=prepared.event_type,
+            event_status=event.status,
+            target_name=prepared.target_name,
+            content_hash=prepared.content_hash,
+            idempotency_key=prepared.idempotency_key,
+            published=False,
+            duplicate_blocked=False,
+            retry_blocked=True,
+            reused_event=reused_event,
+            attempt_count=event.attempt_count,
+            external_id=event.external_id,
+            failure_category=event.target_response.get("failure_category"),
+            retryable=bool(event.target_response.get("retryable")),
+            requires_reconciliation=bool(event.target_response.get("requires_reconciliation")),
+            rate_limited=bool(event.target_response.get("rate_limited")),
+        )
 
     attempt_number = event.attempt_count + 1
     request = PublishRequest(
@@ -383,21 +455,19 @@ def _publish_prepared(
 
     try:
         response = target.publish(request)
-    except Exception as exc:
+    except PublishTargetError as exc:
         event.status = PublicationEventStatus.FAILED
         event.attempt_count = attempt_number
         event.last_attempted_at = effective_attempted_at
         event.last_error = str(exc)
-        event.target_response = {
-            "target": prepared.target_name,
-            "error": str(exc),
-        }
+        event.external_id = exc.external_id or event.external_id
+        event.target_response = exc.as_payload(target_name=prepared.target_name)
         event.payload_snapshot = _with_attempt_record(
             event.payload_snapshot,
             attempt_number=attempt_number,
             attempted_at=effective_attempted_at,
             outcome=PublicationEventStatus.FAILED,
-            external_id=None,
+            external_id=event.external_id,
             response_payload=event.target_response,
             error=str(exc),
         )
@@ -416,6 +486,11 @@ def _publish_prepared(
                 details={
                     "attempt_count": event.attempt_count,
                     "error": str(exc),
+                    "external_id": event.external_id,
+                    "failure_category": exc.category,
+                    "retryable": exc.retryable,
+                    "requires_reconciliation": exc.requires_reconciliation,
+                    "rate_limited": exc.rate_limited,
                     "reused_event": reused_event,
                 },
             ),
@@ -425,6 +500,117 @@ def _publish_prepared(
             prepared=prepared,
             result="failed",
             observed_at=effective_attempted_at,
+            details={
+                "cve_id": prepared.cve.cve_id,
+                "publication_event_id": event.id,
+                "attempt_count": event.attempt_count,
+                "error": str(exc),
+            },
+        )
+        _record_target_publication_metric(
+            session,
+            prepared=prepared,
+            result=exc.category,
+            observed_at=effective_attempted_at,
+            event=event,
+            details={
+                "cve_id": prepared.cve.cve_id,
+                "publication_event_id": event.id,
+                "attempt_count": event.attempt_count,
+                "error": str(exc),
+                "external_id": event.external_id,
+            },
+        )
+        from cve_service.services.alerting import evaluate_operational_alerts
+
+        evaluate_operational_alerts(
+            session,
+            evaluated_at=effective_attempted_at,
+            trigger="publication.failed",
+        )
+        session.flush()
+        return PublicationResult(
+            cve_id=prepared.cve.cve_id,
+            state=prepared.cve.state,
+            decision_id=prepared.decision.id if prepared.decision is not None else None,
+            event_id=event.id,
+            event_type=prepared.event_type,
+            event_status=event.status,
+            target_name=prepared.target_name,
+            content_hash=prepared.content_hash,
+            idempotency_key=prepared.idempotency_key,
+            published=False,
+            duplicate_blocked=False,
+            retry_blocked=False,
+            reused_event=reused_event,
+            attempt_count=event.attempt_count,
+            external_id=event.external_id,
+            failure_category=exc.category,
+            retryable=exc.retryable,
+            requires_reconciliation=exc.requires_reconciliation,
+            rate_limited=exc.rate_limited,
+        )
+    except Exception as exc:
+        event.status = PublicationEventStatus.FAILED
+        event.attempt_count = attempt_number
+        event.last_attempted_at = effective_attempted_at
+        event.last_error = str(exc)
+        event.target_response = {
+            "target": prepared.target_name,
+            "error": str(exc),
+            "failure_category": "unclassified_failure",
+            "retryable": False,
+            "requires_reconciliation": False,
+            "retry_blocked": False,
+            "rate_limited": False,
+        }
+        event.payload_snapshot = _with_attempt_record(
+            event.payload_snapshot,
+            attempt_number=attempt_number,
+            attempted_at=effective_attempted_at,
+            outcome=PublicationEventStatus.FAILED,
+            external_id=event.external_id,
+            response_payload=event.target_response,
+            error=str(exc),
+        )
+        session.flush()
+
+        _write_audit_event(
+            session,
+            cve=prepared.cve,
+            entity_id=event.id,
+            actor_type=actor_type,
+            event_type="publication.failed",
+            state_before=prepared.cve.state,
+            state_after=prepared.cve.state,
+            details=_publication_audit_details(
+                prepared=prepared,
+                details={
+                    "attempt_count": event.attempt_count,
+                    "error": str(exc),
+                    "failure_category": "unclassified_failure",
+                    "reused_event": reused_event,
+                },
+            ),
+        )
+        _record_update_publication_metric(
+            session,
+            prepared=prepared,
+            result="failed",
+            observed_at=effective_attempted_at,
+            details={
+                "cve_id": prepared.cve.cve_id,
+                "publication_event_id": event.id,
+                "attempt_count": event.attempt_count,
+                "error": str(exc),
+            },
+        )
+        _record_target_publication_metric(
+            session,
+            prepared=prepared,
+            result="unclassified_failure",
+            observed_at=effective_attempted_at,
+            event=event,
             details={
                 "cve_id": prepared.cve.cve_id,
                 "publication_event_id": event.id,
@@ -452,9 +638,14 @@ def _publish_prepared(
             idempotency_key=prepared.idempotency_key,
             published=False,
             duplicate_blocked=False,
+            retry_blocked=False,
             reused_event=reused_event,
             attempt_count=event.attempt_count,
             external_id=event.external_id,
+            failure_category="unclassified_failure",
+            retryable=False,
+            requires_reconciliation=False,
+            rate_limited=False,
         )
 
     state_before = prepared.cve.state
@@ -507,6 +698,19 @@ def _publish_prepared(
             "external_id": event.external_id,
         },
     )
+    _record_target_publication_metric(
+        session,
+        prepared=prepared,
+        result="succeeded",
+        observed_at=event.published_at,
+        event=event,
+        details={
+            "cve_id": prepared.cve.cve_id,
+            "publication_event_id": event.id,
+            "attempt_count": event.attempt_count,
+            "external_id": event.external_id,
+        },
+    )
     from cve_service.services.alerting import evaluate_operational_alerts
 
     evaluate_operational_alerts(
@@ -527,9 +731,14 @@ def _publish_prepared(
         idempotency_key=prepared.idempotency_key,
         published=True,
         duplicate_blocked=False,
+        retry_blocked=False,
         reused_event=reused_event,
         attempt_count=event.attempt_count,
         external_id=event.external_id,
+        failure_category=None,
+        retryable=False,
+        requires_reconciliation=False,
+        rate_limited=False,
     )
 
 
@@ -619,11 +828,11 @@ def _build_update_publication_payload_snapshot(
                 "comparison_snapshot": update_candidate.comparison_snapshot,
             },
             "publication_lineage": {
-                "baseline_publication_event_id": str(baseline_publication_event.id),
-                "baseline_event_type": baseline_publication_event.event_type.value,
-                "lineage_root_publication_event_id": str(lineage_root.id) if lineage_root is not None else None,
-            },
-            "baseline_publication": {
+            "baseline_publication_event_id": str(baseline_publication_event.id),
+            "baseline_event_type": baseline_publication_event.event_type.value,
+            "lineage_root_publication_event_id": str(lineage_root.id) if lineage_root is not None else None,
+        },
+        "baseline_publication": {
                 "id": str(baseline_publication_event.id),
                 "event_type": baseline_publication_event.event_type.value,
                 "decision_id": str(baseline_publication_event.decision_id)
@@ -632,13 +841,16 @@ def _build_update_publication_payload_snapshot(
                 "policy_snapshot_id": str(baseline_publication_event.policy_snapshot_id)
                 if baseline_publication_event.policy_snapshot_id is not None
                 else None,
-                "published_at": _serialize_datetime(baseline_publication_event.published_at),
-                "content_hash": baseline_publication_event.content_hash,
-            },
+            "published_at": _serialize_datetime(baseline_publication_event.published_at),
+            "content_hash": baseline_publication_event.content_hash,
+            "destination": baseline_publication_event.destination,
+            "external_id": baseline_publication_event.external_id,
+            "target_response": baseline_publication_event.target_response,
         },
-        "content_hash": content_hash,
-        "attempts": [],
-    }
+    },
+    "content_hash": content_hash,
+    "attempts": [],
+}
 
 
 def _publication_audit_details(
@@ -909,6 +1121,43 @@ def _record_update_publication_metric(
         observed_at=observed_at,
         details={
             "idempotency_key": prepared.idempotency_key,
+            "triggering_update_candidate_id": prepared.update_candidate.id if prepared.update_candidate is not None else None,
+            "baseline_publication_event_id": (
+                prepared.baseline_publication_event.id if prepared.baseline_publication_event is not None else None
+            ),
+            **details,
+        },
+    )
+
+
+def _record_target_publication_metric(
+    session: Session,
+    *,
+    prepared: PreparedPublication,
+    result: str,
+    observed_at: datetime | None,
+    event: PublicationEvent,
+    details: dict[str, Any],
+) -> None:
+    if prepared.target_name != "x":
+        return
+    increment_operational_metric(
+        session,
+        X_PUBLICATION_METRIC_KEY,
+        dimensions={
+            "event_type": prepared.event_type.value,
+            "result": result,
+            "target_name": prepared.target_name,
+        },
+        observed_at=observed_at,
+        details={
+            "idempotency_key": prepared.idempotency_key,
+            "content_hash": prepared.content_hash,
+            "event_status": event.status.value,
+            "failure_category": (event.target_response or {}).get("failure_category"),
+            "retryable": bool((event.target_response or {}).get("retryable")),
+            "requires_reconciliation": bool((event.target_response or {}).get("requires_reconciliation")),
+            "rate_limited": bool((event.target_response or {}).get("rate_limited")),
             "triggering_update_candidate_id": prepared.update_candidate.id if prepared.update_candidate is not None else None,
             "baseline_publication_event_id": (
                 prepared.baseline_publication_event.id if prepared.baseline_publication_event is not None else None
