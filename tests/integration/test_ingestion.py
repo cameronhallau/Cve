@@ -8,6 +8,7 @@ from cve_service.core.db import session_scope
 from cve_service.models.entities import AuditEvent, CVE, CVEIngestionSnapshot, Classification
 from cve_service.models.enums import ClassificationOutcome, CveState
 from cve_service.services.ingestion import PublicFeedRecord, ingest_public_feed_record
+from cve_service.services.public_feed import ingest_cve_org_bundle
 
 
 def test_reingest_of_same_cve_is_idempotent(session_factory) -> None:
@@ -314,5 +315,66 @@ def test_classification_records_are_linked_to_exact_source_snapshot(session_fact
     assert sorted(event.event_type for event in audit_events) == [
         "classification.persisted",
         "ingestion.snapshot_created",
+        "ingestion.snapshot_diffed",
+    ]
+
+
+def test_cve_org_public_feed_bundle_uses_deterministic_ingestion_path(session_factory) -> None:
+    bundle = {
+        "cves": [
+            {
+                "cveMetadata": {
+                    "cveId": "CVE-2026-0008",
+                    "datePublished": "2026-04-02T11:00:00Z",
+                    "dateUpdated": "2026-04-02T11:30:00Z",
+                },
+                "containers": {
+                    "cna": {
+                        "title": "Exchange Server RCE",
+                        "descriptions": [{"lang": "en", "value": "Critical Exchange Server issue."}],
+                        "affected": [{"vendor": "Microsoft Corporation", "product": "MS Exchange Server"}],
+                        "metrics": [{"cvssV3_1": {"baseSeverity": "CRITICAL"}}],
+                    }
+                },
+            },
+            {
+                "cveMetadata": {
+                    "cveId": "CVE-2026-0009",
+                    "datePublished": "2026-04-02T12:00:00Z",
+                    "dateUpdated": "2026-04-02T12:30:00Z",
+                },
+                "containers": {
+                    "cna": {
+                        "title": "Consumer router issue",
+                        "descriptions": [{"lang": "en", "value": "Critical Archer AX50 issue."}],
+                        "affected": [{"vendor": "TPLINK", "product": "AX50 Wireless Router"}],
+                        "metrics": [{"cvssV3_1": {"baseSeverity": "CRITICAL"}}],
+                    }
+                },
+            },
+        ]
+    }
+
+    with session_scope(session_factory) as session:
+        results = ingest_cve_org_bundle(session, bundle)
+        cves = session.scalars(select(CVE).order_by(CVE.cve_id.asc())).all()
+        classifications = session.scalars(select(Classification).order_by(Classification.created_at.asc())).all()
+        audit_events = session.scalars(select(AuditEvent)).all()
+
+    assert [result.cve_id for result in results] == ["CVE-2026-0008", "CVE-2026-0009"]
+    assert results[0].state is CveState.CLASSIFIED
+    assert results[1].state is CveState.SUPPRESSED
+    assert [cve.state for cve in cves] == [CveState.CLASSIFIED, CveState.SUPPRESSED]
+    assert classifications[0].details["canonical_name"] == "microsoft:exchange-server"
+    assert classifications[1].details["canonical_name"] == "tp-link:archer-ax50"
+    assert classifications[0].reason_codes == ["classifier.candidate.enterprise_high_or_critical"]
+    assert classifications[1].reason_codes == ["classifier.deny.consumer_only_product"]
+    assert all(classification.classifier_version == "deterministic-classifier.v1" for classification in classifications)
+    assert sorted(event.event_type for event in audit_events) == [
+        "classification.persisted",
+        "classification.persisted",
+        "ingestion.snapshot_created",
+        "ingestion.snapshot_created",
+        "ingestion.snapshot_diffed",
         "ingestion.snapshot_diffed",
     ]
