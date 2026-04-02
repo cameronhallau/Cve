@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from typing import Any
+from typing import TYPE_CHECKING, Any
 from uuid import UUID
 
 from sqlalchemy import select
@@ -14,6 +14,9 @@ from cve_service.services.ai_review import fingerprint_payload
 from cve_service.services.enrichment import SignalEvidenceRecord, summarize_signal_evidence
 from cve_service.services.reason_codes import reason_code_registry_snapshot, validate_reason_codes
 from cve_service.services.state_machine import InvalidStateTransition, guard_transition
+
+if TYPE_CHECKING:
+    from cve_service.services.publish_queue import PublishJobProducer
 
 MATERIAL_CHANGE_COMPARATOR_VERSION = "phase5-material-change-comparator.v1"
 NON_MATERIAL_METADATA_FIELDS: tuple[str, ...] = (
@@ -70,6 +73,7 @@ class UpdateCandidateDetectionResult:
     reason_codes: tuple[str, ...]
     comparison_fingerprint: str | None
     reused: bool
+    publication_job_id: str | None
 
 
 def compare_published_state(
@@ -163,6 +167,7 @@ def detect_update_candidate(
     trigger: str,
     evaluated_at: datetime | None = None,
     actor_type: AuditActorType = AuditActorType.SYSTEM,
+    publish_producer: PublishJobProducer | None = None,
 ) -> UpdateCandidateDetectionResult:
     cve = _get_cve_by_public_id(session, cve_id)
     if cve.state not in {CveState.PUBLISHED, CveState.UPDATE_PENDING}:
@@ -176,6 +181,7 @@ def detect_update_candidate(
             reason_codes=(),
             comparison_fingerprint=None,
             reused=False,
+            publication_job_id=None,
         )
 
     baseline_publication = _get_latest_successful_publication_event(session, cve.id)
@@ -190,6 +196,7 @@ def detect_update_candidate(
             reason_codes=(),
             comparison_fingerprint=None,
             reused=False,
+            publication_job_id=None,
         )
 
     effective_evaluated_at = _normalize_datetime(evaluated_at) or datetime.now(UTC)
@@ -234,13 +241,13 @@ def detect_update_candidate(
             reason_codes=(),
             comparison_fingerprint=comparison.comparison_fingerprint,
             reused=False,
+            publication_job_id=None,
         )
 
     state_before = cve.state
     cve.state = _resolve_state(cve.state, CveState.UPDATE_PENDING)
 
     if existing_candidate is not None:
-        session.flush()
         _write_audit_event(
             session,
             cve=cve,
@@ -261,6 +268,13 @@ def detect_update_candidate(
                 "reused": True,
             },
         )
+        publication_job_id = _schedule_update_publication(
+            session,
+            cve=cve,
+            publish_producer=publish_producer,
+            requested_at=effective_evaluated_at,
+            actor_type=actor_type,
+        )
         session.flush()
         return UpdateCandidateDetectionResult(
             cve_id=cve.cve_id,
@@ -272,6 +286,7 @@ def detect_update_candidate(
             reason_codes=tuple(existing_candidate.reason_codes),
             comparison_fingerprint=comparison.comparison_fingerprint,
             reused=True,
+            publication_job_id=publication_job_id,
         )
 
     candidate = UpdateCandidate(
@@ -305,6 +320,13 @@ def detect_update_candidate(
             "reused": False,
         },
     )
+    publication_job_id = _schedule_update_publication(
+        session,
+        cve=cve,
+        publish_producer=publish_producer,
+        requested_at=effective_evaluated_at,
+        actor_type=actor_type,
+    )
     session.flush()
     return UpdateCandidateDetectionResult(
         cve_id=cve.cve_id,
@@ -316,6 +338,7 @@ def detect_update_candidate(
         reason_codes=comparison.reason_codes,
         comparison_fingerprint=comparison.comparison_fingerprint,
         reused=False,
+        publication_job_id=publication_job_id,
     )
 
 
@@ -538,6 +561,25 @@ def _write_audit_event(
             state_after=state_after,
             details=details,
         )
+    )
+
+
+def _schedule_update_publication(
+    session: Session,
+    *,
+    cve: CVE,
+    publish_producer: PublishJobProducer | None,
+    requested_at: datetime,
+    actor_type: AuditActorType,
+) -> str | None:
+    if publish_producer is None:
+        return None
+    return publish_producer.schedule(
+        session,
+        cve.cve_id,
+        trigger="update_candidate_detected",
+        requested_at=requested_at,
+        actor_type=actor_type,
     )
 
 

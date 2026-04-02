@@ -10,6 +10,7 @@ from sqlalchemy.orm import Session
 from cve_service.models.entities import AuditEvent, CVE, Evidence
 from cve_service.models.enums import AuditActorType, CveState, EvidenceSignal, EvidenceSourceType, EvidenceStatus
 from cve_service.services.post_enrichment_queue import PostEnrichmentJobProducer
+from cve_service.services.publish_queue import PublishJobProducer
 
 LOW_CONFIDENCE_THRESHOLD = 0.6
 DEFAULT_FRESHNESS_TTL_SECONDS = 30 * 24 * 60 * 60
@@ -99,6 +100,7 @@ def record_evidence(
     evidence_input: EvidenceInput,
     *,
     post_enrichment_producer: PostEnrichmentJobProducer | None = None,
+    publish_producer: PublishJobProducer | None = None,
     retry_ai_review: bool = False,
 ) -> Evidence:
     cve = _get_cve_by_public_id(session, evidence_input.cve_id)
@@ -170,6 +172,7 @@ def record_evidence(
         evaluated_at=normalized_input.collected_at,
         trigger="evidence_upsert",
         post_enrichment_producer=post_enrichment_producer,
+        publish_producer=publish_producer,
         retry_ai_review=retry_ai_review,
     )
     return evidence
@@ -183,6 +186,7 @@ def compute_enrichment_summary(
     trigger: str = "manual_recompute",
     actor_type: AuditActorType = AuditActorType.SYSTEM,
     post_enrichment_producer: PostEnrichmentJobProducer | None = None,
+    publish_producer: PublishJobProducer | None = None,
     retry_ai_review: bool = False,
 ) -> EnrichmentSummary:
     cve = _get_cve_by_public_id(session, cve_id)
@@ -260,6 +264,7 @@ def compute_enrichment_summary(
             trigger=trigger,
             evaluated_at=normalized_evaluated_at,
             actor_type=actor_type,
+            publish_producer=publish_producer,
         )
 
     return EnrichmentSummary(
@@ -379,6 +384,7 @@ def refresh_stale_evidence(
     actor_type: AuditActorType = AuditActorType.WORKER,
     trigger: str = "stale_refresh",
     post_enrichment_producer: PostEnrichmentJobProducer | None = None,
+    publish_producer: PublishJobProducer | None = None,
     retry_ai_review: bool = False,
 ) -> RefreshRunResult:
     effective_evaluated_at = _normalize_datetime(evaluated_at) or datetime.now(UTC)
@@ -417,6 +423,7 @@ def refresh_stale_evidence(
             trigger=trigger,
             actor_type=actor_type,
             post_enrichment_producer=post_enrichment_producer,
+            publish_producer=publish_producer,
             retry_ai_review=retry_ai_review,
         )
 

@@ -14,6 +14,7 @@ from sqlalchemy.orm import Session
 from cve_service.models.entities import AuditEvent, CVE, CVEIngestionSnapshot, Classification, Product
 from cve_service.models.enums import AuditActorType, CveState
 from cve_service.services.classifier import CLASSIFIER_VERSION, CanonicalProduct, classify_record, canonicalize_product
+from cve_service.services.publish_queue import PublishJobProducer
 from cve_service.services.reason_codes import REASON_CODE_REGISTRY_VERSION, reason_code_registry_snapshot
 from cve_service.services.snapshot_diff import compare_snapshots
 from cve_service.services.state_machine import InvalidStateTransition, guard_transition
@@ -59,7 +60,12 @@ class IngestionResult:
     state: CveState
 
 
-def ingest_public_feed_record(session: Session, record: PublicFeedRecord) -> IngestionResult:
+def ingest_public_feed_record(
+    session: Session,
+    record: PublicFeedRecord,
+    *,
+    publish_producer: PublishJobProducer | None = None,
+) -> IngestionResult:
     cve = _get_or_create_cve(session, record)
     canonical_product = canonicalize_product(record.vendor_name, record.product_name)
     product = _get_or_create_product(session, canonical_product)
@@ -232,6 +238,7 @@ def ingest_public_feed_record(session: Session, record: PublicFeedRecord) -> Ing
                 trigger="ingestion.non_material_snapshot_change",
                 evaluated_at=record.source_modified_at,
                 actor_type=AuditActorType.SYSTEM,
+                publish_producer=publish_producer,
             )
         session.flush()
         return IngestionResult(
