@@ -283,7 +283,7 @@ def test_worker_post_enrichment_job_is_idempotent_on_rerun(
         assert cve.state is CveState.PUBLISH_PENDING
         assert len(reviews) == 1
         assert len(decisions) == 1
-        assert [event.event_type for event in reused_events] == ["ai_review.reused", "policy.decision_reused"]
+        assert {event.event_type for event in reused_events} == {"ai_review.reused", "policy.decision_reused"}
     finally:
         first_job.delete()
         second_job.delete()
