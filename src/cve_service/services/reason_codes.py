@@ -113,6 +113,16 @@ _REGISTRY: dict[str, ReasonCodeDefinition] = {
         title="Hard Deterministic Deny",
         summary="A deterministic hard deny remains absolute and suppresses the record.",
     ),
+    "update.material.evidence_itw_status_changed": ReasonCodeDefinition(
+        code="update.material.evidence_itw_status_changed",
+        title="ITW Status Changed",
+        summary="The in-the-wild evidence posture changed since the last published state and requires an update candidate.",
+    ),
+    "update.material.evidence_poc_status_changed": ReasonCodeDefinition(
+        code="update.material.evidence_poc_status_changed",
+        title="PoC Status Changed",
+        summary="The proof-of-concept evidence posture changed since the last published state and requires an update candidate.",
+    ),
 }
 
 

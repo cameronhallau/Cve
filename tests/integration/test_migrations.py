@@ -14,6 +14,7 @@ EXPECTED_TABLES = {
     "policy_decisions",
     "products",
     "publication_events",
+    "update_candidates",
 }
 
 

@@ -64,6 +64,7 @@ class CVE(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     ai_reviews: Mapped[list["AIReview"]] = relationship(back_populates="cve")
     policy_decisions: Mapped[list["PolicyDecision"]] = relationship(back_populates="cve")
     publication_events: Mapped[list["PublicationEvent"]] = relationship(back_populates="cve")
+    update_candidates: Mapped[list["UpdateCandidate"]] = relationship(back_populates="cve")
     audit_events: Mapped[list["AuditEvent"]] = relationship(back_populates="cve")
 
 
@@ -241,6 +242,32 @@ class PublicationEvent(UUIDPrimaryKeyMixin, Base):
     cve: Mapped[CVE] = relationship(back_populates="publication_events")
     decision: Mapped[PolicyDecision | None] = relationship()
     policy_snapshot: Mapped[PolicyConfigurationSnapshot | None] = relationship(back_populates="publication_events")
+    update_candidates: Mapped[list["UpdateCandidate"]] = relationship(back_populates="publication_event")
+
+
+class UpdateCandidate(UUIDPrimaryKeyMixin, Base):
+    __tablename__ = "update_candidates"
+    __table_args__ = (
+        UniqueConstraint(
+            "cve_id",
+            "comparison_fingerprint",
+            name="uq_update_candidates_cve_comparison_fingerprint",
+        ),
+    )
+
+    cve_id: Mapped[UUID] = mapped_column(ForeignKey("cves.id", ondelete="CASCADE"), nullable=False)
+    publication_event_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("publication_events.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    comparison_fingerprint: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    comparator_version: Mapped[str] = mapped_column(String(64), nullable=False)
+    reason_codes: Mapped[list[str]] = mapped_column(JSONB, default=list, nullable=False)
+    comparison_snapshot: Mapped[dict[str, Any]] = mapped_column(JSONB, default=dict, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+
+    cve: Mapped[CVE] = relationship(back_populates="update_candidates")
+    publication_event: Mapped[PublicationEvent | None] = relationship(back_populates="update_candidates")
 
 
 class AuditEvent(UUIDPrimaryKeyMixin, Base):

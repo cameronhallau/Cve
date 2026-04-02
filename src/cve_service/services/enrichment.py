@@ -8,7 +8,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from cve_service.models.entities import AuditEvent, CVE, Evidence
-from cve_service.models.enums import AuditActorType, EvidenceSignal, EvidenceSourceType, EvidenceStatus
+from cve_service.models.enums import AuditActorType, CveState, EvidenceSignal, EvidenceSourceType, EvidenceStatus
 from cve_service.services.post_enrichment_queue import PostEnrichmentJobProducer
 
 LOW_CONFIDENCE_THRESHOLD = 0.6
@@ -248,6 +248,17 @@ def compute_enrichment_summary(
             requested_at=normalized_evaluated_at,
             evaluated_at=normalized_evaluated_at,
             retry_ai_review=retry_ai_review,
+            actor_type=actor_type,
+        )
+
+    if cve.state in {CveState.PUBLISHED, CveState.UPDATE_PENDING}:
+        from cve_service.services.update_detection import detect_update_candidate
+
+        detect_update_candidate(
+            session,
+            cve.cve_id,
+            trigger=trigger,
+            evaluated_at=normalized_evaluated_at,
             actor_type=actor_type,
         )
 

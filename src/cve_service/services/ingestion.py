@@ -17,6 +17,7 @@ from cve_service.services.classifier import CLASSIFIER_VERSION, CanonicalProduct
 from cve_service.services.reason_codes import REASON_CODE_REGISTRY_VERSION, reason_code_registry_snapshot
 from cve_service.services.snapshot_diff import compare_snapshots
 from cve_service.services.state_machine import InvalidStateTransition, guard_transition
+from cve_service.services.update_detection import detect_update_candidate
 
 
 class PublicFeedRecord(BaseModel):
@@ -224,6 +225,14 @@ def ingest_public_feed_record(session: Session, record: PublicFeedRecord) -> Ing
                 else REASON_CODE_REGISTRY_VERSION,
             },
         )
+        if cve.state in {CveState.PUBLISHED, CveState.UPDATE_PENDING}:
+            detect_update_candidate(
+                session,
+                cve.cve_id,
+                trigger="ingestion.non_material_snapshot_change",
+                evaluated_at=record.source_modified_at,
+                actor_type=AuditActorType.SYSTEM,
+            )
         session.flush()
         return IngestionResult(
             cve_id=cve.cve_id,
