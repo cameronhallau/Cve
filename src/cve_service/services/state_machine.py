@@ -12,17 +12,26 @@ ALLOWED_TRANSITIONS: dict[CveState, set[CveState]] = {
         CveState.ENRICHMENT_PENDING,
         CveState.AI_REVIEW_PENDING,
         CveState.POLICY_PENDING,
+        CveState.DEFERRED,
         CveState.SUPPRESSED,
         CveState.ERROR,
     },
     CveState.ENRICHMENT_PENDING: {
         CveState.AI_REVIEW_PENDING,
         CveState.POLICY_PENDING,
+        CveState.DEFERRED,
         CveState.SUPPRESSED,
         CveState.ERROR,
     },
-    CveState.AI_REVIEW_PENDING: {CveState.POLICY_PENDING, CveState.SUPPRESSED, CveState.ERROR},
-    CveState.POLICY_PENDING: {CveState.PUBLISH_PENDING, CveState.SUPPRESSED, CveState.ERROR},
+    CveState.AI_REVIEW_PENDING: {CveState.POLICY_PENDING, CveState.DEFERRED, CveState.SUPPRESSED, CveState.ERROR},
+    CveState.POLICY_PENDING: {CveState.DEFERRED, CveState.PUBLISH_PENDING, CveState.SUPPRESSED, CveState.ERROR},
+    CveState.DEFERRED: {
+        CveState.ENRICHMENT_PENDING,
+        CveState.AI_REVIEW_PENDING,
+        CveState.POLICY_PENDING,
+        CveState.SUPPRESSED,
+        CveState.ERROR,
+    },
     CveState.PUBLISH_PENDING: {CveState.PUBLISHED, CveState.ERROR},
     CveState.PUBLISHED: {CveState.UPDATE_PENDING, CveState.ERROR},
     CveState.UPDATE_PENDING: {CveState.PUBLISH_PENDING, CveState.SUPPRESSED, CveState.ERROR},
@@ -95,4 +104,3 @@ def guard_transition(current_state: CveState, requested_state: str | CveState | 
         raise InvalidStateTransition(f"{current_state} cannot transition to {next_state}")
 
     return next_state
-

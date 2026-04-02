@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -64,6 +65,7 @@ class AIReviewExecutionResult:
     cve_id: str
     review_attempted: bool
     skipped: bool
+    reused: bool
     route_reason: str
     state: CveState
     review_id: UUID | None
@@ -209,7 +211,7 @@ def execute_ai_review(
 
     if not route.should_route:
         state_after = cve.state
-        if route.advance_to_policy:
+        if route.advance_to_policy and cve.state in {CveState.CLASSIFIED, CveState.ENRICHMENT_PENDING, CveState.DEFERRED}:
             state_after = _resolve_state(cve.state, CveState.POLICY_PENDING)
             cve.state = state_after
             session.flush()
@@ -233,6 +235,7 @@ def execute_ai_review(
             cve_id=cve.cve_id,
             review_attempted=False,
             skipped=True,
+            reused=False,
             route_reason=route.reason,
             state=state_after,
             review_id=None,
@@ -242,8 +245,55 @@ def execute_ai_review(
         )
 
     request_pack = build_ai_review_input_pack(session, cve_id, generated_at=requested_at)
-    cve.state = _resolve_state(cve.state, CveState.AI_REVIEW_PENDING)
-    session.flush()
+    request_fingerprint = fingerprint_payload(request_pack)
+    reusable_review = _get_reusable_ai_review(session, cve.id, request_fingerprint)
+    if reusable_review is not None:
+        state_after = cve.state
+        if reusable_review.schema_valid and cve.state in {
+            CveState.CLASSIFIED,
+            CveState.ENRICHMENT_PENDING,
+            CveState.AI_REVIEW_PENDING,
+            CveState.DEFERRED,
+        }:
+            state_after = _resolve_state(cve.state, CveState.POLICY_PENDING)
+            cve.state = state_after
+            session.flush()
+
+        validation_errors = tuple(reusable_review.raw_response.get("validation_errors", []))
+        _write_audit_event(
+            session,
+            cve=cve,
+            entity_type="ai_review",
+            entity_id=reusable_review.id,
+            actor_type=AuditActorType.SYSTEM,
+            event_type="ai_review.reused",
+            state_before=state_before,
+            state_after=state_after,
+            details={
+                "route_reason": route.reason,
+                "request_fingerprint": request_fingerprint,
+                "request_pack": request_pack,
+                "schema_valid": reusable_review.schema_valid,
+                "outcome": reusable_review.outcome.value,
+                "validation_errors": list(validation_errors),
+            },
+        )
+        return AIReviewExecutionResult(
+            cve_id=cve.cve_id,
+            review_attempted=False,
+            skipped=False,
+            reused=True,
+            route_reason=route.reason,
+            state=state_after,
+            review_id=reusable_review.id,
+            schema_valid=reusable_review.schema_valid,
+            outcome=reusable_review.outcome,
+            validation_errors=validation_errors,
+        )
+
+    if cve.state in {CveState.CLASSIFIED, CveState.ENRICHMENT_PENDING, CveState.DEFERRED}:
+        cve.state = _resolve_state(cve.state, CveState.AI_REVIEW_PENDING)
+        session.flush()
 
     provider_response = provider.review(
         AIProviderRequest(
@@ -258,6 +308,8 @@ def execute_ai_review(
         cve_id=cve.id,
         model_name=provider_response.model_name,
         prompt_version=provider_response.prompt_version or PROMPT_VERSION,
+        request_fingerprint=request_fingerprint,
+        request_payload=request_pack,
         outcome=validation.outcome,
         schema_valid=validation.schema_valid,
         advisory_payload=validation.advisory_payload,
@@ -268,7 +320,7 @@ def execute_ai_review(
 
     cve.state = _resolve_state(
         cve.state,
-        CveState.POLICY_PENDING if validation.schema_valid else CveState.SUPPRESSED,
+        CveState.POLICY_PENDING if validation.schema_valid else CveState.DEFERRED,
     )
     session.flush()
 
@@ -283,6 +335,7 @@ def execute_ai_review(
         state_after=cve.state,
         details={
             "route_reason": route.reason,
+            "request_fingerprint": request_fingerprint,
             "request_pack": request_pack,
             "model_name": ai_review.model_name,
             "prompt_version": ai_review.prompt_version,
@@ -298,6 +351,7 @@ def execute_ai_review(
         cve_id=cve.cve_id,
         review_attempted=True,
         skipped=False,
+        reused=False,
         route_reason=route.reason,
         state=cve.state,
         review_id=ai_review.id,
@@ -369,6 +423,11 @@ def load_schema(schema_name: str) -> dict[str, Any]:
     return json.loads(schema_path.read_text(encoding="utf-8"))
 
 
+def fingerprint_payload(payload: dict[str, Any]) -> str:
+    serialized = json.dumps(payload, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(serialized.encode("utf-8")).hexdigest()
+
+
 def _derive_ai_review_outcome(advisory_payload: dict[str, Any]) -> AIReviewOutcome:
     enterprise_relevance = advisory_payload["enterprise_relevance_assessment"]
     exploit_path = advisory_payload["exploit_path_assessment"]
@@ -419,6 +478,18 @@ def _get_latest_classification(session: Session, cve_pk: UUID) -> Classification
         select(Classification)
         .where(Classification.cve_id == cve_pk)
         .order_by(Classification.created_at.desc(), Classification.id.desc())
+        .limit(1)
+    )
+
+
+def _get_reusable_ai_review(session: Session, cve_pk: UUID, request_fingerprint: str) -> AIReview | None:
+    return session.scalar(
+        select(AIReview)
+        .where(
+            AIReview.cve_id == cve_pk,
+            AIReview.request_fingerprint == request_fingerprint,
+        )
+        .order_by(AIReview.created_at.desc(), AIReview.id.desc())
         .limit(1)
     )
 

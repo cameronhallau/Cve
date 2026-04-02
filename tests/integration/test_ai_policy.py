@@ -7,7 +7,7 @@ from sqlalchemy import select
 from cve_service.core.db import session_scope
 from cve_service.models.entities import AIReview, AuditEvent, CVE, PolicyDecision
 from cve_service.models.enums import AIReviewOutcome, ClassificationOutcome, CveState, EvidenceSignal, EvidenceStatus, PolicyDecisionOutcome
-from cve_service.services.ai_review import AIProviderRequest, AIProviderResponse, execute_ai_review
+from cve_service.services.ai_review import AIProviderRequest, AIProviderResponse, execute_ai_review, fingerprint_payload
 from cve_service.services.enrichment import EvidenceInput, record_evidence
 from cve_service.services.ingestion import PublicFeedRecord, ingest_public_feed_record
 from cve_service.services.policy import apply_policy_gate
@@ -39,7 +39,7 @@ def test_invalid_ai_json_is_rejected_and_does_not_advance_state(session_factory)
     assert result.schema_valid is False
     assert result.outcome is AIReviewOutcome.INVALID
     assert cve is not None
-    assert cve.state is CveState.SUPPRESSED
+    assert cve.state is CveState.DEFERRED
     assert len(reviews) == 1
     assert reviews[0].schema_valid is False
     assert reviews[0].outcome is AIReviewOutcome.INVALID
@@ -67,6 +67,8 @@ def test_hard_deny_cannot_be_overridden_by_ai_or_policy(session_factory) -> None
             cve_id=cve.id,
             model_name="mock-gpt",
             prompt_version="phase3-ai-review.v1",
+            request_fingerprint=fingerprint_payload({"fixture": "hard-deny"}),
+            request_payload={"fixture": "hard-deny"},
             outcome=AIReviewOutcome.ADVISORY_PUBLISH,
             schema_valid=True,
             advisory_payload={

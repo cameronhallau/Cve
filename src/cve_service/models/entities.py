@@ -150,6 +150,8 @@ class AIReview(UUIDPrimaryKeyMixin, Base):
     cve_id: Mapped[UUID] = mapped_column(ForeignKey("cves.id", ondelete="CASCADE"), nullable=False)
     model_name: Mapped[str] = mapped_column(String(128), nullable=False)
     prompt_version: Mapped[str | None] = mapped_column(String(64))
+    request_fingerprint: Mapped[str] = mapped_column(String(64), nullable=False)
+    request_payload: Mapped[dict[str, Any]] = mapped_column(JSONB, default=dict, nullable=False)
     outcome: Mapped[AIReviewOutcome] = mapped_column(
         Enum(AIReviewOutcome, name="ai_review_outcome"),
         default=AIReviewOutcome.INVALID,
@@ -169,6 +171,7 @@ class PolicyDecision(UUIDPrimaryKeyMixin, Base):
     cve_id: Mapped[UUID] = mapped_column(ForeignKey("cves.id", ondelete="CASCADE"), nullable=False)
     ai_review_id: Mapped[UUID | None] = mapped_column(ForeignKey("ai_reviews.id", ondelete="SET NULL"))
     policy_version: Mapped[str] = mapped_column(String(64), nullable=False)
+    input_fingerprint: Mapped[str] = mapped_column(String(64), nullable=False)
     decision: Mapped[PolicyDecisionOutcome] = mapped_column(
         Enum(PolicyDecisionOutcome, name="policy_decision_outcome"),
         nullable=False,
