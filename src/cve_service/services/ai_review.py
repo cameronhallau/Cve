@@ -292,6 +292,7 @@ def execute_ai_review(
             "advisory_payload": ai_review.advisory_payload,
         },
     )
+    session.flush()
 
     return AIReviewExecutionResult(
         cve_id=cve.cve_id,
