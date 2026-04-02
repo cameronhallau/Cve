@@ -16,6 +16,7 @@ from cve_service.models.entities import (
     PolicyConfigurationSnapshot,
     PolicyDecision,
     PublicationEvent,
+    UpdateCandidate,
 )
 from cve_service.models.enums import (
     AuditActorType,
@@ -25,33 +26,46 @@ from cve_service.models.enums import (
     PublicationEventType,
 )
 from cve_service.services.ai_review import fingerprint_payload
-from cve_service.services.publish_content import PublishContent, build_initial_publish_content
+from cve_service.services.publish_content import (
+    PublishContent,
+    build_initial_publish_content,
+    build_update_publish_content,
+)
 from cve_service.services.publish_targets import PublishRequest, PublishTarget
 from cve_service.services.state_machine import InvalidStateTransition, guard_transition
 
 PUBLICATION_EVENT_SCHEMA_VERSION = "phase4-publication-event.v1"
+UPDATE_PUBLICATION_EVENT_SCHEMA_VERSION = "phase5-update-publication-event.v1"
 
 
 @dataclass(frozen=True, slots=True)
-class PreparedInitialPublication:
+class PreparedPublication:
     cve: CVE
-    classification: Classification
-    decision: PolicyDecision
+    classification: Classification | None
+    decision: PolicyDecision | None
     policy_snapshot: PolicyConfigurationSnapshot | None
     ai_review: AIReview | None
     target_name: str
+    event_type: PublicationEventType
     content: PublishContent
     content_hash: str
     idempotency_key: str
     payload_snapshot: dict[str, Any]
+    update_candidate: UpdateCandidate | None = None
+    baseline_publication_event: PublicationEvent | None = None
+
+
+PreparedInitialPublication = PreparedPublication
+PreparedUpdatePublication = PreparedPublication
 
 
 @dataclass(frozen=True, slots=True)
 class PublicationResult:
     cve_id: str
     state: CveState
-    decision_id: UUID
+    decision_id: UUID | None
     event_id: UUID
+    event_type: PublicationEventType
     event_status: PublicationEventStatus
     target_name: str
     content_hash: str
@@ -61,6 +75,18 @@ class PublicationResult:
     reused_event: bool
     attempt_count: int
     external_id: str | None
+
+
+def prepare_publication(
+    session: Session,
+    cve_id: str,
+    *,
+    target_name: str,
+) -> PreparedPublication:
+    cve = _get_cve_by_public_id(session, cve_id)
+    if cve.state is CveState.UPDATE_PENDING:
+        return prepare_update_publication(session, cve_id, target_name=target_name)
+    return prepare_initial_publication(session, cve_id, target_name=target_name)
 
 
 def prepare_initial_publication(
@@ -99,27 +125,113 @@ def prepare_initial_publication(
             "content_hash": content_hash,
         }
     )
-    return PreparedInitialPublication(
+    return PreparedPublication(
         cve=cve,
         classification=classification,
         decision=decision,
         policy_snapshot=policy_snapshot,
         ai_review=ai_review,
         target_name=target_name,
+        event_type=PublicationEventType.INITIAL,
         content=content,
         content_hash=content_hash,
         idempotency_key=idempotency_key,
-        payload_snapshot=_build_publication_payload_snapshot(
+        payload_snapshot=_build_initial_publication_payload_snapshot(
             cve=cve,
+            classification=classification,
+            decision=decision,
+            policy_snapshot=policy_snapshot,
+            ai_review=ai_review,
+            target_name=target_name,
+            content=content,
+            content_hash=content_hash,
+            idempotency_key=idempotency_key,
+        ),
+    )
+
+
+def prepare_update_publication(
+    session: Session,
+    cve_id: str,
+    *,
+    target_name: str,
+) -> PreparedUpdatePublication:
+    cve = _get_cve_by_public_id(session, cve_id)
+    if cve.state not in {CveState.UPDATE_PENDING, CveState.PUBLISHED}:
+        raise ValueError(f"cve is not in an update-publishable state for {cve_id}: {cve.state.value}")
+
+    update_candidate = _get_latest_update_candidate(session, cve.id)
+    if update_candidate is None:
+        raise ValueError(f"no update candidate found for {cve_id}")
+    if update_candidate.publication_event_id is None:
+        raise ValueError(f"update candidate has no baseline publication event for {cve_id}")
+
+    baseline_publication_event = _get_publication_event_by_id(session, update_candidate.publication_event_id)
+    if baseline_publication_event is None:
+        raise ValueError(f"baseline publication event not found for {cve_id}")
+
+    classification = _get_latest_classification(session, cve.id)
+    decision = baseline_publication_event.decision or _get_latest_policy_decision(session, cve.id)
+    policy_snapshot = baseline_publication_event.policy_snapshot
+    if policy_snapshot is None and decision is not None:
+        policy_snapshot = decision.policy_snapshot
+    ai_review = _get_latest_ai_review(session, cve.id)
+    content = build_update_publish_content(update_candidate=update_candidate)
+    content_hash = fingerprint_payload(content.as_payload())
+    idempotency_key = fingerprint_payload(
+        {
+            "cve_id": cve.cve_id,
+            "event_type": PublicationEventType.UPDATE.value,
+            "target_name": target_name,
+            "comparison_fingerprint": update_candidate.comparison_fingerprint,
+            "content_hash": content_hash,
+        }
+    )
+    return PreparedPublication(
+        cve=cve,
         classification=classification,
         decision=decision,
         policy_snapshot=policy_snapshot,
         ai_review=ai_review,
         target_name=target_name,
+        event_type=PublicationEventType.UPDATE,
         content=content,
         content_hash=content_hash,
         idempotency_key=idempotency_key,
+        payload_snapshot=_build_update_publication_payload_snapshot(
+            session=session,
+            cve=cve,
+            classification=classification,
+            decision=decision,
+            policy_snapshot=policy_snapshot,
+            ai_review=ai_review,
+            update_candidate=update_candidate,
+            baseline_publication_event=baseline_publication_event,
+            target_name=target_name,
+            content=content,
+            content_hash=content_hash,
+            idempotency_key=idempotency_key,
         ),
+        update_candidate=update_candidate,
+        baseline_publication_event=baseline_publication_event,
+    )
+
+
+def publish_publication(
+    session: Session,
+    cve_id: str,
+    target: PublishTarget,
+    *,
+    attempted_at: datetime | None = None,
+    actor_type: AuditActorType = AuditActorType.WORKER,
+) -> PublicationResult:
+    prepared = prepare_publication(session, cve_id, target_name=target.name)
+    return _publish_prepared(
+        session,
+        prepared,
+        target,
+        attempted_at=attempted_at,
+        actor_type=actor_type,
     )
 
 
@@ -132,12 +244,47 @@ def publish_initial_publication(
     actor_type: AuditActorType = AuditActorType.WORKER,
 ) -> PublicationResult:
     prepared = prepare_initial_publication(session, cve_id, target_name=target.name)
+    return _publish_prepared(
+        session,
+        prepared,
+        target,
+        attempted_at=attempted_at,
+        actor_type=actor_type,
+    )
+
+
+def publish_update_publication(
+    session: Session,
+    cve_id: str,
+    target: PublishTarget,
+    *,
+    attempted_at: datetime | None = None,
+    actor_type: AuditActorType = AuditActorType.WORKER,
+) -> PublicationResult:
+    prepared = prepare_update_publication(session, cve_id, target_name=target.name)
+    return _publish_prepared(
+        session,
+        prepared,
+        target,
+        attempted_at=attempted_at,
+        actor_type=actor_type,
+    )
+
+
+def _publish_prepared(
+    session: Session,
+    prepared: PreparedPublication,
+    target: PublishTarget,
+    *,
+    attempted_at: datetime | None,
+    actor_type: AuditActorType,
+) -> PublicationResult:
     effective_attempted_at = _normalize_datetime(attempted_at) or datetime.now(UTC)
 
     successful_duplicate = _get_successful_publication_event(
         session,
         cve_id=prepared.cve.id,
-        event_type=PublicationEventType.INITIAL,
+        event_type=prepared.event_type,
         target_name=prepared.target_name,
         content_hash=prepared.content_hash,
     )
@@ -153,20 +300,21 @@ def publish_initial_publication(
             event_type="publication.duplicate_blocked",
             state_before=state_before,
             state_after=prepared.cve.state,
-            details={
-                "target_name": prepared.target_name,
-                "content_hash": prepared.content_hash,
-                "idempotency_key": prepared.idempotency_key,
-                "existing_event_id": str(successful_duplicate.id),
-                "duplicate_reason": "existing_successful_publication",
-            },
+            details=_publication_audit_details(
+                prepared=prepared,
+                details={
+                    "existing_event_id": str(successful_duplicate.id),
+                    "duplicate_reason": "existing_successful_publication",
+                },
+            ),
         )
         session.flush()
         return PublicationResult(
             cve_id=prepared.cve.cve_id,
             state=prepared.cve.state,
-            decision_id=prepared.decision.id,
+            decision_id=prepared.decision.id if prepared.decision is not None else None,
             event_id=successful_duplicate.id,
+            event_type=prepared.event_type,
             event_status=successful_duplicate.status,
             target_name=prepared.target_name,
             content_hash=prepared.content_hash,
@@ -183,9 +331,9 @@ def publish_initial_publication(
     if event is None:
         event = PublicationEvent(
             cve_id=prepared.cve.id,
-            decision_id=prepared.decision.id,
+            decision_id=prepared.decision.id if prepared.decision is not None else None,
             policy_snapshot_id=prepared.policy_snapshot.id if prepared.policy_snapshot is not None else None,
-            event_type=PublicationEventType.INITIAL,
+            event_type=prepared.event_type,
             status=PublicationEventStatus.PENDING,
             destination=prepared.target_name,
             idempotency_key=prepared.idempotency_key,
@@ -194,6 +342,10 @@ def publish_initial_publication(
             target_response={},
             attempt_count=0,
             occurred_at=effective_attempted_at,
+            triggering_update_candidate_id=prepared.update_candidate.id if prepared.update_candidate is not None else None,
+            baseline_publication_event_id=(
+                prepared.baseline_publication_event.id if prepared.baseline_publication_event is not None else None
+            ),
         )
         session.add(event)
         session.flush()
@@ -201,7 +353,7 @@ def publish_initial_publication(
     attempt_number = event.attempt_count + 1
     request = PublishRequest(
         cve_id=prepared.cve.cve_id,
-        event_type=PublicationEventType.INITIAL.value,
+        event_type=prepared.event_type.value,
         target_name=prepared.target_name,
         idempotency_key=prepared.idempotency_key,
         content_hash=prepared.content_hash,
@@ -239,21 +391,22 @@ def publish_initial_publication(
             event_type="publication.failed",
             state_before=prepared.cve.state,
             state_after=prepared.cve.state,
-            details={
-                "target_name": prepared.target_name,
-                "content_hash": prepared.content_hash,
-                "idempotency_key": prepared.idempotency_key,
-                "attempt_count": event.attempt_count,
-                "error": str(exc),
-                "reused_event": reused_event,
-            },
+            details=_publication_audit_details(
+                prepared=prepared,
+                details={
+                    "attempt_count": event.attempt_count,
+                    "error": str(exc),
+                    "reused_event": reused_event,
+                },
+            ),
         )
         session.flush()
         return PublicationResult(
             cve_id=prepared.cve.cve_id,
             state=prepared.cve.state,
-            decision_id=prepared.decision.id,
+            decision_id=prepared.decision.id if prepared.decision is not None else None,
             event_id=event.id,
+            event_type=prepared.event_type,
             event_status=event.status,
             target_name=prepared.target_name,
             content_hash=prepared.content_hash,
@@ -294,21 +447,22 @@ def publish_initial_publication(
         event_type="publication.succeeded",
         state_before=state_before,
         state_after=prepared.cve.state,
-        details={
-            "target_name": prepared.target_name,
-            "content_hash": prepared.content_hash,
-            "idempotency_key": prepared.idempotency_key,
-            "attempt_count": event.attempt_count,
-            "external_id": event.external_id,
-            "reused_event": reused_event,
-        },
+        details=_publication_audit_details(
+            prepared=prepared,
+            details={
+                "attempt_count": event.attempt_count,
+                "external_id": event.external_id,
+                "reused_event": reused_event,
+            },
+        ),
     )
     session.flush()
     return PublicationResult(
         cve_id=prepared.cve.cve_id,
         state=prepared.cve.state,
-        decision_id=prepared.decision.id,
+        decision_id=prepared.decision.id if prepared.decision is not None else None,
         event_id=event.id,
+        event_type=prepared.event_type,
         event_status=event.status,
         target_name=prepared.target_name,
         content_hash=prepared.content_hash,
@@ -321,7 +475,7 @@ def publish_initial_publication(
     )
 
 
-def _build_publication_payload_snapshot(
+def _build_initial_publication_payload_snapshot(
     *,
     cve: CVE,
     classification: Classification,
@@ -351,37 +505,99 @@ def _build_publication_payload_snapshot(
                 "source_modified_at": _serialize_datetime(cve.source_modified_at),
                 "state": cve.state.value,
             },
-            "classification": {
-                "id": str(classification.id),
-                "classifier_version": classification.classifier_version,
-                "outcome": classification.outcome.value,
-                "reason_codes": list(classification.reason_codes),
-                "details": classification.details,
-            },
-            "policy_decision": {
-                "id": str(decision.id),
-                "policy_snapshot_id": str(decision.policy_snapshot_id) if decision.policy_snapshot_id is not None else None,
-                "policy_version": decision.policy_version,
-                "decision": decision.decision.value,
-                "deterministic_outcome": decision.deterministic_outcome.value
-                if decision.deterministic_outcome is not None
-                else None,
-                "reason_codes": list(decision.reason_codes),
-                "input_fingerprint": decision.input_fingerprint,
-                "inputs_snapshot": decision.inputs_snapshot,
-                "rationale": decision.rationale,
-                "conflict_resolution": decision.conflict_resolution,
-            },
-            "policy_configuration": {
-                "id": str(policy_snapshot.id) if policy_snapshot is not None else None,
-                "policy_version": policy_snapshot.policy_version if policy_snapshot is not None else decision.policy_version,
-                "config_fingerprint": policy_snapshot.config_fingerprint if policy_snapshot is not None else None,
-                "snapshot": policy_snapshot.config_snapshot if policy_snapshot is not None else None,
-            },
+            "classification": _serialize_classification(classification),
+            "policy_decision": _serialize_policy_decision(decision),
+            "policy_configuration": _serialize_policy_configuration(policy_snapshot, decision),
             "ai_review": _serialize_ai_review(ai_review),
         },
         "content_hash": content_hash,
         "attempts": [],
+    }
+
+
+def _build_update_publication_payload_snapshot(
+    *,
+    session: Session,
+    cve: CVE,
+    classification: Classification | None,
+    decision: PolicyDecision | None,
+    policy_snapshot: PolicyConfigurationSnapshot | None,
+    ai_review: AIReview | None,
+    update_candidate: UpdateCandidate,
+    baseline_publication_event: PublicationEvent,
+    target_name: str,
+    content: PublishContent,
+    content_hash: str,
+    idempotency_key: str,
+) -> dict[str, Any]:
+    lineage_root = _resolve_lineage_root_publication_event(session, baseline_publication_event)
+    return {
+        "schema_version": UPDATE_PUBLICATION_EVENT_SCHEMA_VERSION,
+        "event_type": PublicationEventType.UPDATE.value,
+        "target": {
+            "name": target_name,
+            "idempotency_key": idempotency_key,
+        },
+        "publish_content": content.as_payload(),
+        "replay_context": {
+            "cve": {
+                "cve_id": cve.cve_id,
+                "title": cve.title,
+                "description": cve.description,
+                "severity": cve.severity,
+                "source_published_at": _serialize_datetime(cve.source_published_at),
+                "source_modified_at": _serialize_datetime(cve.source_modified_at),
+                "state": cve.state.value,
+            },
+            "classification": _serialize_classification(classification),
+            "policy_decision": _serialize_policy_decision(decision),
+            "policy_configuration": _serialize_policy_configuration(policy_snapshot, decision),
+            "ai_review": _serialize_ai_review(ai_review),
+            "update_candidate": {
+                "id": str(update_candidate.id),
+                "comparison_fingerprint": update_candidate.comparison_fingerprint,
+                "comparator_version": update_candidate.comparator_version,
+                "reason_codes": list(update_candidate.reason_codes),
+                "comparison_snapshot": update_candidate.comparison_snapshot,
+            },
+            "publication_lineage": {
+                "baseline_publication_event_id": str(baseline_publication_event.id),
+                "baseline_event_type": baseline_publication_event.event_type.value,
+                "lineage_root_publication_event_id": str(lineage_root.id) if lineage_root is not None else None,
+            },
+            "baseline_publication": {
+                "id": str(baseline_publication_event.id),
+                "event_type": baseline_publication_event.event_type.value,
+                "decision_id": str(baseline_publication_event.decision_id)
+                if baseline_publication_event.decision_id is not None
+                else None,
+                "policy_snapshot_id": str(baseline_publication_event.policy_snapshot_id)
+                if baseline_publication_event.policy_snapshot_id is not None
+                else None,
+                "published_at": _serialize_datetime(baseline_publication_event.published_at),
+                "content_hash": baseline_publication_event.content_hash,
+            },
+        },
+        "content_hash": content_hash,
+        "attempts": [],
+    }
+
+
+def _publication_audit_details(
+    *,
+    prepared: PreparedPublication,
+    details: dict[str, Any],
+) -> dict[str, Any]:
+    return {
+        "event_type": prepared.event_type.value,
+        "target_name": prepared.target_name,
+        "content_hash": prepared.content_hash,
+        "idempotency_key": prepared.idempotency_key,
+        "triggering_update_candidate_id": str(prepared.update_candidate.id) if prepared.update_candidate is not None else None,
+        "baseline_publication_event_id": (
+            str(prepared.baseline_publication_event.id) if prepared.baseline_publication_event is not None else None
+        ),
+        **details,
     }
 
 
@@ -446,6 +662,21 @@ def _get_latest_policy_decision(session: Session, cve_pk: UUID) -> PolicyDecisio
     )
 
 
+def _get_latest_update_candidate(session: Session, cve_pk: UUID) -> UpdateCandidate | None:
+    return session.scalar(
+        select(UpdateCandidate)
+        .where(UpdateCandidate.cve_id == cve_pk)
+        .order_by(UpdateCandidate.created_at.desc(), UpdateCandidate.id.desc())
+        .limit(1)
+    )
+
+
+def _get_publication_event_by_id(session: Session, event_id: UUID | None) -> PublicationEvent | None:
+    if event_id is None:
+        return None
+    return session.scalar(select(PublicationEvent).where(PublicationEvent.id == event_id).limit(1))
+
+
 def _get_publication_event_by_idempotency(session: Session, idempotency_key: str) -> PublicationEvent | None:
     return session.scalar(
         select(PublicationEvent)
@@ -477,6 +708,21 @@ def _get_successful_publication_event(
     )
 
 
+def _resolve_lineage_root_publication_event(
+    session: Session,
+    publication_event: PublicationEvent,
+) -> PublicationEvent | None:
+    current = publication_event
+    seen_ids: set[UUID] = {publication_event.id}
+    while current.baseline_publication_event_id is not None:
+        next_event = _get_publication_event_by_id(session, current.baseline_publication_event_id)
+        if next_event is None or next_event.id in seen_ids:
+            break
+        seen_ids.add(next_event.id)
+        current = next_event
+    return current
+
+
 def _resolve_state(current_state: CveState, desired_state: CveState) -> CveState:
     if current_state == desired_state:
         return current_state
@@ -496,6 +742,53 @@ def _normalize_datetime(value: datetime | None) -> datetime | None:
 
 def _serialize_datetime(value: datetime | None) -> str | None:
     return value.isoformat() if value is not None else None
+
+
+def _serialize_classification(classification: Classification | None) -> dict[str, Any] | None:
+    if classification is None:
+        return None
+    return {
+        "id": str(classification.id),
+        "classifier_version": classification.classifier_version,
+        "outcome": classification.outcome.value,
+        "reason_codes": list(classification.reason_codes),
+        "details": classification.details,
+        "canonical_name": classification.details.get("canonical_name"),
+        "product_scope": classification.details.get("product_scope"),
+    }
+
+
+def _serialize_policy_decision(decision: PolicyDecision | None) -> dict[str, Any] | None:
+    if decision is None:
+        return None
+    return {
+        "id": str(decision.id),
+        "policy_snapshot_id": str(decision.policy_snapshot_id) if decision.policy_snapshot_id is not None else None,
+        "policy_version": decision.policy_version,
+        "decision": decision.decision.value,
+        "deterministic_outcome": decision.deterministic_outcome.value
+        if decision.deterministic_outcome is not None
+        else None,
+        "reason_codes": list(decision.reason_codes),
+        "input_fingerprint": decision.input_fingerprint,
+        "inputs_snapshot": decision.inputs_snapshot,
+        "rationale": decision.rationale,
+        "conflict_resolution": decision.conflict_resolution,
+    }
+
+
+def _serialize_policy_configuration(
+    policy_snapshot: PolicyConfigurationSnapshot | None,
+    decision: PolicyDecision | None,
+) -> dict[str, Any] | None:
+    if policy_snapshot is None and decision is None:
+        return None
+    return {
+        "id": str(policy_snapshot.id) if policy_snapshot is not None else None,
+        "policy_version": policy_snapshot.policy_version if policy_snapshot is not None else decision.policy_version,
+        "config_fingerprint": policy_snapshot.config_fingerprint if policy_snapshot is not None else None,
+        "snapshot": policy_snapshot.config_snapshot if policy_snapshot is not None else None,
+    }
 
 
 def _serialize_ai_review(ai_review: AIReview | None) -> dict[str, Any] | None:

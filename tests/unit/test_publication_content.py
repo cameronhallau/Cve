@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from uuid import uuid4
 
-from cve_service.models.entities import AIReview, CVE, Classification, PolicyDecision
+from cve_service.models.entities import AIReview, CVE, Classification, PolicyDecision, UpdateCandidate
 from cve_service.models.enums import (
     AIReviewOutcome,
     ClassificationOutcome,
@@ -12,7 +12,7 @@ from cve_service.models.enums import (
     EvidenceStatus,
     PolicyDecisionOutcome,
 )
-from cve_service.services.publish_content import build_initial_publish_content
+from cve_service.services.publish_content import build_initial_publish_content, build_update_publish_content
 from cve_service.services.publication import prepare_initial_publication
 
 
@@ -77,6 +77,66 @@ def test_build_initial_publish_content_is_canonical_and_replayable() -> None:
     assert "AI Advisory Used: yes" in content.body
     assert content.metadata["policy_reason_codes"] == ["policy.publish.enterprise_candidate_with_poc"]
     assert content.as_payload()["labels"][0] == "severity:critical"
+
+
+def test_build_update_publish_content_uses_stored_material_change_snapshot() -> None:
+    candidate = UpdateCandidate(
+        id=uuid4(),
+        cve_id=uuid4(),
+        publication_event_id=uuid4(),
+        comparison_fingerprint="comparison-fingerprint",
+        comparator_version="phase5-material-change-comparator.v1",
+        reason_codes=["update.material.evidence_poc_status_changed"],
+        comparison_snapshot={
+            "baseline": {
+                "publication": {"event_id": "baseline-event-1"},
+                "cve": {
+                    "cve_id": "CVE-2026-0702",
+                    "severity": "CRITICAL",
+                },
+                "evidence": {
+                    "poc": {"status": "UNKNOWN", "confidence": None},
+                    "itw": {"status": "UNKNOWN", "confidence": None},
+                },
+            },
+            "current": {
+                "cve": {
+                    "cve_id": "CVE-2026-0702",
+                    "severity": "CRITICAL",
+                },
+                "classification": {
+                    "canonical_name": "microsoft:exchange_server",
+                    "product_scope": "enterprise",
+                },
+                "evidence": {
+                    "poc": {"status": "PRESENT", "confidence": 0.97},
+                    "itw": {"status": "UNKNOWN", "confidence": None},
+                },
+            },
+            "changes": {
+                "material": [
+                    {
+                        "field": "evidence.poc_status",
+                        "before": "UNKNOWN",
+                        "after": "PRESENT",
+                        "explanation": "Proof-of-concept status changed relative to the last published state.",
+                    }
+                ]
+            },
+            "reason_codes": ["update.material.evidence_poc_status_changed"],
+        },
+    )
+
+    content = build_update_publish_content(update_candidate=candidate)
+
+    assert content.schema_version == "phase5-update-publication.v1"
+    assert content.title == "CVE-2026-0702 Update: POC UNKNOWN -> PRESENT"
+    assert content.summary == "CRITICAL | microsoft:exchange_server | poc:UNKNOWN->PRESENT"
+    assert "Baseline Publication Event: baseline-event-1" in content.body
+    assert "Current Evidence: PoC=PRESENT (0.97), ITW=UNKNOWN (n/a)" in content.body
+    assert content.metadata["comparison_fingerprint"] == "comparison-fingerprint"
+    assert content.metadata["baseline_publication_event_id"] == "baseline-event-1"
+    assert "publication:update" in content.as_payload()["labels"]
 
 
 def test_prepare_initial_publication_changes_idempotency_key_per_target(session_factory) -> None:

@@ -12,10 +12,10 @@ from sqlalchemy.orm import Session
 from cve_service.core.db import register_after_commit_callback
 from cve_service.models.entities import AuditEvent, CVE, PolicyDecision
 from cve_service.models.enums import AuditActorType, CveState, PolicyDecisionOutcome
-from cve_service.services.publication import prepare_initial_publication
+from cve_service.services.publication import prepare_publication
 
 PUBLISH_JOB_PATH = "cve_service.workers.jobs.process_publication_job"
-ELIGIBLE_STATES = {CveState.PUBLISH_PENDING}
+ELIGIBLE_STATES = {CveState.PUBLISH_PENDING, CveState.UPDATE_PENDING}
 
 
 class PublishJobProducer(Protocol):
@@ -79,8 +79,11 @@ class RQPublishJobProducer:
             )
             return None
 
-        prepared = prepare_initial_publication(session, cve_id, target_name=self.publish_target_name)
-        job_id = f"publication:{prepared.target_name}:{cve.cve_id}:{prepared.idempotency_key[:16]}"
+        prepared = prepare_publication(session, cve_id, target_name=self.publish_target_name)
+        job_id = (
+            f"publication:{prepared.event_type.value.lower()}:"
+            f"{prepared.target_name}:{cve.cve_id}:{prepared.idempotency_key[:16]}"
+        )
         existing_job = self.queue.fetch_job(job_id)
         event_type = "workflow.publish_enqueue_reused" if existing_job is not None else "workflow.publish_enqueue_requested"
         _write_enqueue_audit_event(
@@ -93,9 +96,18 @@ class RQPublishJobProducer:
                 "queue_name": self.queue.name,
                 "job_id": job_id,
                 "target_name": prepared.target_name,
-                "decision_id": str(prepared.decision.id),
+                "publication_event_type": prepared.event_type.value,
+                "decision_id": str(prepared.decision.id) if prepared.decision is not None else None,
                 "content_hash": prepared.content_hash,
                 "idempotency_key": prepared.idempotency_key,
+                "triggering_update_candidate_id": (
+                    str(prepared.update_candidate.id) if prepared.update_candidate is not None else None
+                ),
+                "baseline_publication_event_id": (
+                    str(prepared.baseline_publication_event.id)
+                    if prepared.baseline_publication_event is not None
+                    else None
+                ),
                 "requested_at": _serialize_datetime(requested_at),
             },
         )

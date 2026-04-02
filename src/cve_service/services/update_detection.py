@@ -348,6 +348,8 @@ def _build_current_state_snapshot(session: Session, cve: CVE, evaluated_at: date
             "classifier_version": classification.classifier_version if classification is not None else None,
             "outcome": classification.outcome.value if classification is not None else None,
             "reason_codes": list(classification.reason_codes) if classification is not None else [],
+            "canonical_name": classification.details.get("canonical_name") if classification is not None else None,
+            "product_scope": classification.details.get("product_scope") if classification is not None else None,
         },
         "policy": {
             "last_policy_outcome": cve.last_policy_outcome.value if cve.last_policy_outcome is not None else None,
@@ -374,12 +376,16 @@ def _extract_published_state_snapshot(publication_event: PublicationEvent) -> di
     published_evidence = (replay_context.get("policy_decision") or {}).get("inputs_snapshot", {}).get("evidence", {})
     published_policy = replay_context.get("policy_decision", {})
     published_cve = replay_context.get("cve", {})
+    published_classification = replay_context.get("classification", {})
+    publication_lineage = replay_context.get("publication_lineage", {})
     return {
         "publication": {
             "event_id": str(publication_event.id),
             "event_type": publication_event.event_type.value,
             "published_at": _serialize_datetime(publication_event.published_at),
             "content_hash": publication_event.content_hash,
+            "baseline_publication_event_id": publication_lineage.get("baseline_publication_event_id"),
+            "lineage_root_publication_event_id": publication_lineage.get("lineage_root_publication_event_id"),
         },
         "cve": {
             "cve_id": published_cve.get("cve_id"),
@@ -389,6 +395,14 @@ def _extract_published_state_snapshot(publication_event: PublicationEvent) -> di
             "source_published_at": published_cve.get("source_published_at"),
             "source_modified_at": published_cve.get("source_modified_at"),
             "state": published_cve.get("state"),
+        },
+        "classification": {
+            "id": published_classification.get("id"),
+            "classifier_version": published_classification.get("classifier_version"),
+            "outcome": published_classification.get("outcome"),
+            "reason_codes": list(published_classification.get("reason_codes", [])),
+            "canonical_name": published_classification.get("canonical_name", publish_metadata.get("canonical_name")),
+            "product_scope": published_classification.get("product_scope", publish_metadata.get("product_scope")),
         },
         "policy": {
             "decision_id": published_policy.get("id"),

@@ -238,11 +238,28 @@ class PublicationEvent(UUIDPrimaryKeyMixin, Base):
     payload_snapshot: Mapped[dict[str, Any]] = mapped_column(JSONB, default=dict, nullable=False)
     occurred_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+    triggering_update_candidate_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("update_candidates.id", ondelete="SET NULL")
+    )
+    baseline_publication_event_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("publication_events.id", ondelete="SET NULL")
+    )
 
     cve: Mapped[CVE] = relationship(back_populates="publication_events")
     decision: Mapped[PolicyDecision | None] = relationship()
     policy_snapshot: Mapped[PolicyConfigurationSnapshot | None] = relationship(back_populates="publication_events")
-    update_candidates: Mapped[list["UpdateCandidate"]] = relationship(back_populates="publication_event")
+    update_candidates: Mapped[list["UpdateCandidate"]] = relationship(
+        back_populates="publication_event",
+        foreign_keys="UpdateCandidate.publication_event_id",
+    )
+    triggering_update_candidate: Mapped["UpdateCandidate | None"] = relationship(
+        foreign_keys=[triggering_update_candidate_id],
+        back_populates="triggered_publication_events",
+    )
+    baseline_publication_event: Mapped["PublicationEvent | None"] = relationship(
+        remote_side="PublicationEvent.id",
+        foreign_keys=[baseline_publication_event_id],
+    )
 
 
 class UpdateCandidate(UUIDPrimaryKeyMixin, Base):
@@ -267,7 +284,14 @@ class UpdateCandidate(UUIDPrimaryKeyMixin, Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
 
     cve: Mapped[CVE] = relationship(back_populates="update_candidates")
-    publication_event: Mapped[PublicationEvent | None] = relationship(back_populates="update_candidates")
+    publication_event: Mapped[PublicationEvent | None] = relationship(
+        back_populates="update_candidates",
+        foreign_keys=[publication_event_id],
+    )
+    triggered_publication_events: Mapped[list[PublicationEvent]] = relationship(
+        back_populates="triggering_update_candidate",
+        foreign_keys="PublicationEvent.triggering_update_candidate_id",
+    )
 
 
 class AuditEvent(UUIDPrimaryKeyMixin, Base):

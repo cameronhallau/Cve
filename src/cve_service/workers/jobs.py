@@ -13,7 +13,7 @@ from cve_service.services.ai_provider import build_ai_review_provider
 from cve_service.services.enrichment import refresh_stale_evidence
 from cve_service.services.post_enrichment import process_post_enrichment_workflow
 from cve_service.services.publish_queue import RQPublishJobProducer
-from cve_service.services.publication import publish_initial_publication
+from cve_service.services.publication import publish_publication
 from cve_service.services.publish_targets import build_publish_target
 
 
@@ -147,7 +147,7 @@ def process_publication_job(
                 target_name=publish_target_name,
                 behavior=publish_target_behavior,
             )
-            result = publish_initial_publication(
+            result = publish_publication(
                 session,
                 cve_id,
                 target,
@@ -157,8 +157,9 @@ def process_publication_job(
             "status": "processed" if result.published or result.duplicate_blocked else "failed",
             "cve_id": result.cve_id,
             "state": result.state.value,
-            "decision_id": str(result.decision_id),
+            "decision_id": str(result.decision_id) if result.decision_id is not None else None,
             "publication_event_id": str(result.event_id),
+            "publication_event_type": result.event_type.value,
             "publication_status": result.event_status.value,
             "target_name": result.target_name,
             "content_hash": result.content_hash,

@@ -34,7 +34,7 @@ ALLOWED_TRANSITIONS: dict[CveState, set[CveState]] = {
     },
     CveState.PUBLISH_PENDING: {CveState.PUBLISHED, CveState.ERROR},
     CveState.PUBLISHED: {CveState.UPDATE_PENDING, CveState.ERROR},
-    CveState.UPDATE_PENDING: {CveState.PUBLISH_PENDING, CveState.SUPPRESSED, CveState.ERROR},
+    CveState.UPDATE_PENDING: {CveState.PUBLISH_PENDING, CveState.PUBLISHED, CveState.SUPPRESSED, CveState.ERROR},
     CveState.SUPPRESSED: set(),
     CveState.ERROR: set(),
 }
