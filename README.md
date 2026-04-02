@@ -29,6 +29,8 @@ The current implementation is the Phase 0 foundation on the Python, FastAPI, Pos
 
 Environment defaults live in [.env.example](/home/cam/Documents/Github/Vuln/Cve/.env.example).
 
+Production deployment defaults live in [.env.production.example](/home/cam/Documents/Github/Vuln/Cve/.env.production.example).
+
 ### Publish Target Selection
 
 The publish path stays opt-in and defaults to `console`.
@@ -95,6 +97,7 @@ Operational notes:
 - Reconciliation-required X publication failures remain fail-closed. Operators must reconcile first instead of rerunning publish commands blindly.
 
 Deployment runbook and timer examples live in [runbooks/autonomous-production.md](/home/cam/Documents/Github/Vuln/Cve/runbooks/autonomous-production.md).
+Checked-in `systemd` units live in [systemd/README.md](/home/cam/Documents/Github/Vuln/Cve/systemd/README.md).
 
 ### Verification
 

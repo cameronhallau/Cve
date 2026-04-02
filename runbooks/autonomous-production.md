@@ -35,6 +35,13 @@ Use this runbook for single-server autonomous production on X with:
     - `CVE_X_ACCESS_TOKEN`
     - `CVE_X_ACCESS_TOKEN_SECRET`
 
+Checked-in deployment artifacts:
+
+- environment template:
+  - [.env.production.example](/home/cam/Documents/Github/Vuln/Cve/.env.production.example)
+- systemd units:
+  - [systemd/README.md](/home/cam/Documents/Github/Vuln/Cve/systemd/README.md)
+
 ## Cadence
 
 - ingest polling:
@@ -47,7 +54,22 @@ Use this runbook for single-server autonomous production on X with:
   - every 5 minutes
   - responsibility: persist replayable alert state from current metrics, audit events, and publication outcomes
 
-## systemd Example
+## systemd
+
+Use the checked-in unit files from [systemd/README.md](/home/cam/Documents/Github/Vuln/Cve/systemd/README.md) as the production baseline.
+
+Install flow:
+
+1. Copy `.env.production.example` into `/etc/cve-service/cve.env` and replace placeholder secrets.
+2. Copy the `systemd/*.service` and `systemd/*.timer` files into `/etc/systemd/system/`.
+3. Run `systemctl daemon-reload`.
+4. Enable and start:
+   - `cve-worker.service`
+   - `cve-ingest-poll.timer`
+   - `cve-stale-refresh.timer`
+   - `cve-alert-eval.timer`
+
+Reference layout:
 
 Worker service:
 
@@ -175,3 +197,4 @@ WantedBy=timers.target
 - use [ingestion-failure.md](/home/cam/Documents/Github/Vuln/Cve/runbooks/ingestion-failure.md) for source cursor and parser issues
 - use [publish-failure.md](/home/cam/Documents/Github/Vuln/Cve/runbooks/publish-failure.md) for X reconciliation and publish retry control
 - confirm `source_progress`, `audit_events`, `operational_metrics`, and `publication_events` before declaring recovery complete
+- if deployment paths differ from `/srv/cve/Cve`, update both the copied `systemd` units and the cron examples consistently
