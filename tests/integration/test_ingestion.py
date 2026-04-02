@@ -29,22 +29,25 @@ def test_reingest_of_same_cve_is_idempotent(session_factory) -> None:
 
         snapshots = session.scalars(select(CVEIngestionSnapshot)).all()
         classifications = session.scalars(select(Classification)).all()
-        audit_events = session.scalars(select(AuditEvent).order_by(AuditEvent.created_at.asc())).all()
+        audit_events = session.scalars(select(AuditEvent)).all()
 
     assert first.snapshot_created is True
     assert first.classification_created is True
+    assert first.diff_evaluated is True
     assert first.state is CveState.CLASSIFIED
     assert second.snapshot_created is False
     assert second.classification_created is False
+    assert second.diff_evaluated is False
     assert second.classifier_version == first.classifier_version
     assert second.reason_codes == first.reason_codes
     assert len(snapshots) == 1
     assert len(classifications) == 1
-    assert [event.event_type for event in audit_events] == [
-        "ingestion.snapshot_created",
+    assert sorted(event.event_type for event in audit_events) == [
         "classification.persisted",
-        "ingestion.idempotent_reuse",
         "classification.reused",
+        "ingestion.idempotent_reuse",
+        "ingestion.snapshot_created",
+        "ingestion.snapshot_diffed",
     ]
 
 
@@ -56,8 +59,8 @@ def test_consumer_only_products_are_denied_and_persist_classifier_trace(session_
         severity="CRITICAL",
         source_name="fixture-feed",
         source_modified_at=datetime(2026, 4, 2, 2, 0, tzinfo=UTC),
-        vendor_name="TP-Link",
-        product_name="Archer AX50 Router",
+        vendor_name="TPLINK",
+        product_name="AX50 Wireless Router",
     )
 
     with session_scope(session_factory) as session:
@@ -71,8 +74,180 @@ def test_consumer_only_products_are_denied_and_persist_classifier_trace(session_
     assert stored.classifier_version == "deterministic-classifier.v1"
     assert stored.reason_codes == ["classifier.deny.consumer_only_product"]
     assert stored.details["reason_code_registry_version"] == "reason-codes.v1"
+    assert stored.snapshot_id is not None
+    assert stored.details["canonical_name"] == "tp-link:archer-ax50"
     assert cve is not None
     assert cve.state is CveState.SUPPRESSED
+
+
+def test_alias_only_rename_reingest_keeps_same_canonical_identity_without_classification_drift(session_factory) -> None:
+    initial = PublicFeedRecord(
+        cve_id="CVE-2026-0006",
+        title="Exchange Server RCE",
+        description="Alias stability scenario.",
+        severity="HIGH",
+        source_name="fixture-feed",
+        source_modified_at=datetime(2026, 4, 2, 8, 0, tzinfo=UTC),
+        vendor_name="Microsoft",
+        product_name="Exchange Server",
+    )
+    alias_rename = PublicFeedRecord(
+        cve_id="CVE-2026-0006",
+        title="Exchange Server RCE",
+        description="Alias stability scenario.",
+        severity="HIGH",
+        source_name="fixture-feed",
+        source_modified_at=datetime(2026, 4, 2, 9, 0, tzinfo=UTC),
+        vendor_name="Microsoft Corporation",
+        product_name="MS Exchange Server",
+    )
+
+    with session_scope(session_factory) as session:
+        first = ingest_public_feed_record(session, initial)
+        second = ingest_public_feed_record(session, alias_rename)
+        snapshots = session.scalars(
+            select(CVEIngestionSnapshot).order_by(CVEIngestionSnapshot.snapshot_index.asc())
+        ).all()
+        classifications = session.scalars(select(Classification)).all()
+        audit_events = session.scalars(select(AuditEvent)).all()
+
+    assert first.classification_created is True
+    assert second.snapshot_created is True
+    assert second.classification_created is False
+    assert second.material_change_detected is False
+    assert second.diff_material_fields == ()
+    assert sorted(second.diff_changed_fields) == [
+        "source_labels.product_name",
+        "source_labels.vendor_name",
+        "source_modified_at",
+    ]
+    assert len(snapshots) == 2
+    assert snapshots[0].normalized_payload["product"]["canonical_name"] == "microsoft:exchange-server"
+    assert snapshots[1].normalized_payload["product"]["canonical_name"] == "microsoft:exchange-server"
+    assert len(classifications) == 1
+    assert classifications[0].details["canonical_name"] == "microsoft:exchange-server"
+    assert classifications[0].details["canonical_vendor_name"] == "Microsoft"
+    assert classifications[0].details["canonical_product_name"] == "Exchange Server"
+    assert sorted(event.event_type for event in audit_events) == [
+        "classification.persisted",
+        "classification.skipped_non_material_churn",
+        "ingestion.snapshot_created",
+        "ingestion.snapshot_created",
+        "ingestion.snapshot_diffed",
+        "ingestion.snapshot_diffed",
+    ]
+
+
+def test_material_change_creates_retained_snapshot_and_reclassifies(session_factory) -> None:
+    initial = PublicFeedRecord(
+        cve_id="CVE-2026-0004",
+        title="Exchange Server RCE",
+        description="Initial enterprise impact.",
+        severity="CRITICAL",
+        source_name="fixture-feed",
+        source_modified_at=datetime(2026, 4, 2, 4, 0, tzinfo=UTC),
+        vendor_name="Microsoft",
+        product_name="Exchange Server",
+    )
+    changed = PublicFeedRecord(
+        cve_id="CVE-2026-0004",
+        title="Exchange Server RCE",
+        description="Vendor revision expands the affected build list.",
+        severity="CRITICAL",
+        source_name="fixture-feed",
+        source_modified_at=datetime(2026, 4, 2, 5, 0, tzinfo=UTC),
+        vendor_name="Microsoft Corporation",
+        product_name="MS Exchange Server",
+    )
+
+    with session_scope(session_factory) as session:
+        first = ingest_public_feed_record(session, initial)
+        second = ingest_public_feed_record(session, changed)
+        snapshots = session.scalars(
+            select(CVEIngestionSnapshot).order_by(CVEIngestionSnapshot.snapshot_index.asc())
+        ).all()
+        classifications = session.scalars(select(Classification)).all()
+        audit_events = session.scalars(select(AuditEvent)).all()
+        cve = session.scalar(select(CVE).where(CVE.cve_id == initial.cve_id))
+
+    classifications = sorted(classifications, key=lambda item: item.details["snapshot_index"])
+    assert first.classification_created is True
+    assert second.snapshot_created is True
+    assert second.classification_created is True
+    assert second.material_change_detected is True
+    assert set(second.diff_material_fields) == {"description"}
+    assert len(snapshots) == 2
+    assert snapshots[1].previous_snapshot_id == snapshots[0].id
+    assert len(classifications) == 2
+    assert classifications[0].outcome is ClassificationOutcome.CANDIDATE
+    assert classifications[1].outcome is ClassificationOutcome.CANDIDATE
+    assert classifications[1].details["reclassification_trigger"] == "material_snapshot_change"
+    assert classifications[0].details["canonical_name"] == "microsoft:exchange-server"
+    assert classifications[1].details["canonical_name"] == "microsoft:exchange-server"
+    assert classifications[1].snapshot_id == snapshots[1].id
+    assert cve is not None
+    assert cve.state is CveState.CLASSIFIED
+    assert sorted(event.event_type for event in audit_events) == [
+        "classification.persisted",
+        "classification.reclassified",
+        "ingestion.snapshot_created",
+        "ingestion.snapshot_created",
+        "ingestion.snapshot_diffed",
+        "ingestion.snapshot_diffed",
+    ]
+
+
+def test_non_material_metadata_churn_retains_snapshot_without_reclassification(session_factory) -> None:
+    initial = PublicFeedRecord(
+        cve_id="CVE-2026-0005",
+        title="Exchange Server RCE",
+        description="Metadata churn scenario.",
+        severity="HIGH",
+        source_name="fixture-feed",
+        source_modified_at=datetime(2026, 4, 2, 6, 0, tzinfo=UTC),
+        vendor_name="Microsoft",
+        product_name="Exchange Server",
+    )
+    metadata_only = PublicFeedRecord(
+        cve_id="CVE-2026-0005",
+        title="Exchange Server RCE",
+        description="Metadata churn scenario.",
+        severity="HIGH",
+        source_name="fixture-feed",
+        source_modified_at=datetime(2026, 4, 2, 7, 0, tzinfo=UTC),
+        vendor_name="Microsoft",
+        product_name="Exchange Server",
+    )
+
+    with session_scope(session_factory) as session:
+        first = ingest_public_feed_record(session, initial)
+        second = ingest_public_feed_record(session, metadata_only)
+        snapshots = session.scalars(
+            select(CVEIngestionSnapshot).order_by(CVEIngestionSnapshot.snapshot_index.asc())
+        ).all()
+        classifications = session.scalars(select(Classification)).all()
+        audit_events = session.scalars(select(AuditEvent)).all()
+        cve = session.scalar(select(CVE).where(CVE.cve_id == initial.cve_id))
+
+    assert first.classification_created is True
+    assert second.snapshot_created is True
+    assert second.classification_created is False
+    assert second.material_change_detected is False
+    assert second.diff_changed_fields == ("source_modified_at",)
+    assert second.diff_material_fields == ()
+    assert len(snapshots) == 2
+    assert snapshots[1].previous_snapshot_id == snapshots[0].id
+    assert len(classifications) == 1
+    assert cve is not None
+    assert cve.state is CveState.CLASSIFIED
+    assert sorted(event.event_type for event in audit_events) == [
+        "classification.persisted",
+        "classification.skipped_non_material_churn",
+        "ingestion.snapshot_created",
+        "ingestion.snapshot_created",
+        "ingestion.snapshot_diffed",
+        "ingestion.snapshot_diffed",
+    ]
 
 
 def test_classifier_persists_before_ai_route_is_considered(session_factory) -> None:
@@ -110,3 +285,32 @@ def test_classifier_persists_before_ai_route_is_considered(session_factory) -> N
     }
     assert len(audit_events) == 1
     assert audit_events[0].details["outcome"] == "NEEDS_AI"
+
+
+def test_classification_records_are_linked_to_exact_source_snapshot(session_factory) -> None:
+    record = PublicFeedRecord(
+        cve_id="CVE-2026-0007",
+        title="Exchange Server RCE",
+        description="Trace linkage scenario.",
+        severity="CRITICAL",
+        source_name="fixture-feed",
+        source_modified_at=datetime(2026, 4, 2, 10, 0, tzinfo=UTC),
+        vendor_name="Microsoft",
+        product_name="Exchange Server",
+    )
+
+    with session_scope(session_factory) as session:
+        result = ingest_public_feed_record(session, record)
+        classification = session.get(Classification, result.classification_id)
+        snapshot = session.scalar(select(CVEIngestionSnapshot).where(CVEIngestionSnapshot.snapshot_index == 1))
+        audit_events = session.scalars(select(AuditEvent)).all()
+
+    assert classification is not None
+    assert snapshot is not None
+    assert classification.snapshot_id == snapshot.id
+    assert classification.details["snapshot_id"] == str(snapshot.id)
+    assert sorted(event.event_type for event in audit_events) == [
+        "classification.persisted",
+        "ingestion.snapshot_created",
+        "ingestion.snapshot_diffed",
+    ]

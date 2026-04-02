@@ -4,8 +4,18 @@ from cve_service.models.enums import ClassificationOutcome, CveState
 from cve_service.services.classifier import classify_record, canonicalize_product
 
 
+def test_alias_variants_map_to_same_canonical_product_identity() -> None:
+    primary = canonicalize_product("Microsoft", "Exchange Server")
+    alias = canonicalize_product("Microsoft Corporation", "MS Exchange Server")
+
+    assert primary.canonical_name == "microsoft:exchange-server"
+    assert alias.canonical_name == primary.canonical_name
+    assert alias.canonical_vendor_name == "Microsoft"
+    assert alias.canonical_product_name == "Exchange Server"
+
+
 def test_classifier_denies_consumer_only_products() -> None:
-    product = canonicalize_product("TP-Link", "Archer AX50 Router")
+    product = canonicalize_product("TPLINK", "AX50 Wireless Router")
 
     result = classify_record("CRITICAL", product)
 
@@ -13,6 +23,7 @@ def test_classifier_denies_consumer_only_products() -> None:
     assert result.next_state is CveState.SUPPRESSED
     assert result.reason_codes == ("classifier.deny.consumer_only_product",)
     assert result.ai_route_eligible is False
+    assert result.details["canonical_name"] == "tp-link:archer-ax50"
 
 
 def test_classifier_fail_closes_ambiguous_products_before_ai() -> None:

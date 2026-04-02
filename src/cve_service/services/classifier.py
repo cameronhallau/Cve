@@ -17,9 +17,12 @@ ProductScope = Literal["enterprise", "consumer_only", "unknown"]
 class CanonicalProduct:
     vendor_name: str
     product_name: str
+    canonical_vendor_name: str
+    canonical_product_name: str
     canonical_name: str
     scope: ProductScope
-    matched_alias: str | None = None
+    matched_vendor_alias: str | None = None
+    matched_product_alias: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -34,6 +37,8 @@ class ClassificationResult:
 
 @dataclass(frozen=True, slots=True)
 class ProductCatalogEntry:
+    canonical_vendor_name: str
+    canonical_product_name: str
     canonical_name: str
     scope: ProductScope
     vendor_aliases: tuple[str, ...]
@@ -42,24 +47,49 @@ class ProductCatalogEntry:
 
 _PRODUCT_CATALOG: tuple[ProductCatalogEntry, ...] = (
     ProductCatalogEntry(
+        canonical_vendor_name="Microsoft",
+        canonical_product_name="Exchange Server",
         canonical_name="microsoft:exchange-server",
         scope="enterprise",
-        vendor_aliases=("microsoft",),
-        product_aliases=("exchange server", "microsoft exchange server"),
+        vendor_aliases=("microsoft", "ms", "microsoft corporation"),
+        product_aliases=(
+            "exchange server",
+            "microsoft exchange server",
+            "exchange",
+            "ms exchange server",
+        ),
     ),
     ProductCatalogEntry(
+        canonical_vendor_name="Cisco",
+        canonical_product_name="Adaptive Security Appliance",
         canonical_name="cisco:adaptive-security-appliance",
         scope="enterprise",
         vendor_aliases=("cisco", "cisco systems"),
-        product_aliases=("adaptive security appliance", "asa", "asa firewall"),
+        product_aliases=(
+            "adaptive security appliance",
+            "asa",
+            "asa firewall",
+            "cisco asa",
+            "cisco adaptive security appliance",
+        ),
     ),
     ProductCatalogEntry(
+        canonical_vendor_name="TP-Link",
+        canonical_product_name="Archer AX50",
         canonical_name="tp-link:archer-ax50",
         scope="consumer_only",
-        vendor_aliases=("tp-link", "tp link"),
-        product_aliases=("archer ax50", "archer ax50 router", "archer router ax50"),
+        vendor_aliases=("tp-link", "tp link", "tplink"),
+        product_aliases=(
+            "archer ax50",
+            "archer ax50 router",
+            "archer router ax50",
+            "ax50 wireless router",
+            "tp link archer ax50",
+        ),
     ),
     ProductCatalogEntry(
+        canonical_vendor_name="Netgear",
+        canonical_product_name="Nighthawk R7000",
         canonical_name="netgear:nighthawk-r7000",
         scope="consumer_only",
         vendor_aliases=("netgear",),
@@ -73,6 +103,11 @@ def _normalize_text(value: str) -> str:
     return re.sub(r"\s+", " ", collapsed)
 
 
+def _tokenize(value: str) -> tuple[str, ...]:
+    normalized = _normalize_text(value)
+    return tuple(token for token in normalized.split(" ") if token)
+
+
 def _slugify(value: str) -> str:
     return re.sub(r"-{2,}", "-", re.sub(r"[^a-z0-9]+", "-", value.lower()).strip("-"))
 
@@ -83,26 +118,49 @@ def normalize_severity(value: str | None) -> str | None:
     return value.strip().upper()
 
 
+def _alias_matches(normalized_value: str, alias: str) -> bool:
+    if normalized_value == alias:
+        return True
+
+    value_tokens = set(_tokenize(normalized_value))
+    alias_tokens = set(_tokenize(alias))
+    return bool(alias_tokens) and alias_tokens.issubset(value_tokens)
+
+
 def canonicalize_product(vendor_name: str, product_name: str) -> CanonicalProduct:
     normalized_vendor = _normalize_text(vendor_name)
     normalized_product = _normalize_text(product_name)
 
     for entry in _PRODUCT_CATALOG:
-        if normalized_vendor in entry.vendor_aliases and normalized_product in entry.product_aliases:
+        matched_vendor_alias = next(
+            (alias for alias in entry.vendor_aliases if _alias_matches(normalized_vendor, alias)),
+            None,
+        )
+        matched_product_alias = next(
+            (alias for alias in entry.product_aliases if _alias_matches(normalized_product, alias)),
+            None,
+        )
+        if matched_vendor_alias is not None and matched_product_alias is not None:
             return CanonicalProduct(
                 vendor_name=vendor_name,
                 product_name=product_name,
+                canonical_vendor_name=entry.canonical_vendor_name,
+                canonical_product_name=entry.canonical_product_name,
                 canonical_name=entry.canonical_name,
                 scope=entry.scope,
-                matched_alias=normalized_product,
+                matched_vendor_alias=matched_vendor_alias,
+                matched_product_alias=matched_product_alias,
             )
 
     return CanonicalProduct(
         vendor_name=vendor_name,
         product_name=product_name,
+        canonical_vendor_name=vendor_name,
+        canonical_product_name=product_name,
         canonical_name=f"{_slugify(vendor_name)}:{_slugify(product_name)}",
         scope="unknown",
-        matched_alias=None,
+        matched_vendor_alias=None,
+        matched_product_alias=None,
     )
 
 
@@ -121,7 +179,11 @@ def classify_record(severity: str | None, product: CanonicalProduct) -> Classifi
                 "classifier_version": CLASSIFIER_VERSION,
                 "reason_code_registry_version": REASON_CODE_REGISTRY_VERSION,
                 "product_scope": product.scope,
+                "canonical_vendor_name": product.canonical_vendor_name,
+                "canonical_product_name": product.canonical_product_name,
                 "canonical_name": product.canonical_name,
+                "matched_vendor_alias": product.matched_vendor_alias,
+                "matched_product_alias": product.matched_product_alias,
                 "severity": normalized_severity,
                 "ai_route": {"eligible": False, "allowed": False, "blocked_reason": None},
             },
@@ -139,7 +201,11 @@ def classify_record(severity: str | None, product: CanonicalProduct) -> Classifi
                 "classifier_version": CLASSIFIER_VERSION,
                 "reason_code_registry_version": REASON_CODE_REGISTRY_VERSION,
                 "product_scope": product.scope,
+                "canonical_vendor_name": product.canonical_vendor_name,
+                "canonical_product_name": product.canonical_product_name,
                 "canonical_name": product.canonical_name,
+                "matched_vendor_alias": product.matched_vendor_alias,
+                "matched_product_alias": product.matched_product_alias,
                 "severity": normalized_severity,
                 "ai_route": {"eligible": False, "allowed": False, "blocked_reason": None},
             },
@@ -162,7 +228,11 @@ def classify_record(severity: str | None, product: CanonicalProduct) -> Classifi
                 "classifier_version": CLASSIFIER_VERSION,
                 "reason_code_registry_version": REASON_CODE_REGISTRY_VERSION,
                 "product_scope": product.scope,
+                "canonical_vendor_name": product.canonical_vendor_name,
+                "canonical_product_name": product.canonical_product_name,
                 "canonical_name": product.canonical_name,
+                "matched_vendor_alias": product.matched_vendor_alias,
+                "matched_product_alias": product.matched_product_alias,
                 "severity": normalized_severity,
                 "ai_route": {"eligible": True, "allowed": False, "blocked_reason": AI_BLOCK_REASON},
             },
@@ -179,7 +249,11 @@ def classify_record(severity: str | None, product: CanonicalProduct) -> Classifi
             "classifier_version": CLASSIFIER_VERSION,
             "reason_code_registry_version": REASON_CODE_REGISTRY_VERSION,
             "product_scope": product.scope,
+            "canonical_vendor_name": product.canonical_vendor_name,
+            "canonical_product_name": product.canonical_product_name,
             "canonical_name": product.canonical_name,
+            "matched_vendor_alias": product.matched_vendor_alias,
+            "matched_product_alias": product.matched_product_alias,
             "severity": normalized_severity,
             "ai_route": {"eligible": False, "allowed": False, "blocked_reason": None},
         },

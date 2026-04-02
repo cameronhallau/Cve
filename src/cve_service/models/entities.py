@@ -73,6 +73,9 @@ class CVEIngestionSnapshot(UUIDPrimaryKeyMixin, Base):
     )
 
     cve_id: Mapped[UUID] = mapped_column(ForeignKey("cves.id", ondelete="CASCADE"), nullable=False)
+    previous_snapshot_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("cve_ingestion_snapshots.id", ondelete="SET NULL")
+    )
     source_name: Mapped[str] = mapped_column(String(128), nullable=False)
     source_record_id: Mapped[str | None] = mapped_column(String(128))
     snapshot_index: Mapped[int] = mapped_column(Integer(), nullable=False)
@@ -83,12 +86,14 @@ class CVEIngestionSnapshot(UUIDPrimaryKeyMixin, Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
 
     cve: Mapped[CVE] = relationship(back_populates="ingestion_snapshots")
+    previous_snapshot: Mapped["CVEIngestionSnapshot | None"] = relationship(remote_side="CVEIngestionSnapshot.id")
 
 
 class Classification(UUIDPrimaryKeyMixin, Base):
     __tablename__ = "classifications"
 
     cve_id: Mapped[UUID] = mapped_column(ForeignKey("cves.id", ondelete="CASCADE"), nullable=False)
+    snapshot_id: Mapped[UUID | None] = mapped_column(ForeignKey("cve_ingestion_snapshots.id", ondelete="SET NULL"))
     product_id: Mapped[UUID | None] = mapped_column(ForeignKey("products.id", ondelete="SET NULL"))
     classifier_version: Mapped[str | None] = mapped_column(String(64))
     outcome: Mapped[ClassificationOutcome] = mapped_column(
@@ -102,6 +107,7 @@ class Classification(UUIDPrimaryKeyMixin, Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
 
     cve: Mapped[CVE] = relationship(back_populates="classifications")
+    snapshot: Mapped[CVEIngestionSnapshot | None] = relationship()
     product: Mapped[Product | None] = relationship()
 
 
