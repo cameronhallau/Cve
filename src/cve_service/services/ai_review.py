@@ -15,10 +15,12 @@ from sqlalchemy.orm import Session
 
 from cve_service.models.entities import AIReview, AuditEvent, CVE, Classification
 from cve_service.models.enums import AIReviewOutcome, AuditActorType, ClassificationOutcome, CveState
+from cve_service.services.operational_metrics import increment_operational_metric
 from cve_service.services.state_machine import InvalidStateTransition, guard_transition
 
 REQUEST_SCHEMA_VERSION = "phase3-ai-review-request.v1"
 PROMPT_VERSION = "phase3-ai-review.v1"
+AI_SCHEMA_VALIDATION_METRIC_KEY = "phase5.ai_review.validation.total"
 
 
 class AIReviewProvider(Protocol):
@@ -367,6 +369,28 @@ def execute_ai_review(
             "validation_errors": list(validation.validation_errors),
             "advisory_payload": ai_review.advisory_payload,
         },
+    )
+    increment_operational_metric(
+        session,
+        AI_SCHEMA_VALIDATION_METRIC_KEY,
+        dimensions={
+            "result": "valid" if ai_review.schema_valid else "invalid",
+            "route_reason": route.reason,
+        },
+        observed_at=requested_at,
+        details={
+            "cve_id": cve.cve_id,
+            "ai_review_id": ai_review.id,
+            "model_name": ai_review.model_name,
+            "retry_override": retry_override,
+            "validation_errors": list(validation.validation_errors),
+        },
+    )
+    from cve_service.services.alerting import evaluate_operational_alerts
+
+    evaluate_operational_alerts(
+        session,
+        trigger="ai_review.persisted",
     )
     session.flush()
 

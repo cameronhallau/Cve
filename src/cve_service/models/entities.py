@@ -313,6 +313,46 @@ class OperationalMetric(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     last_details: Mapped[dict[str, Any]] = mapped_column(JSONB, default=dict, nullable=False)
 
 
+class OperationalAlertState(UUIDPrimaryKeyMixin, TimestampMixin, Base):
+    __tablename__ = "operational_alert_states"
+    __table_args__ = (UniqueConstraint("alert_key", name="uq_operational_alert_states_alert_key"),)
+
+    alert_key: Mapped[str] = mapped_column(String(160), nullable=False, index=True)
+    rule_key: Mapped[str] = mapped_column(String(128), nullable=False, index=True)
+    scope_key: Mapped[str] = mapped_column(String(128), nullable=False, index=True)
+    status: Mapped[str] = mapped_column(String(32), nullable=False, index=True)
+    severity: Mapped[str] = mapped_column(String(32), nullable=False)
+    contract_key: Mapped[str] = mapped_column(String(128), nullable=False)
+    rule_version: Mapped[str] = mapped_column(String(64), nullable=False)
+    title: Mapped[str] = mapped_column(String(255), nullable=False)
+    summary: Mapped[str] = mapped_column(Text(), nullable=False)
+    runbook_path: Mapped[str | None] = mapped_column(String(255))
+    current_payload: Mapped[dict[str, Any]] = mapped_column(JSONB, default=dict, nullable=False)
+    first_activated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    last_evaluated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    last_transition_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    resolved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+class OperationalAlertTransition(UUIDPrimaryKeyMixin, Base):
+    __tablename__ = "operational_alert_transitions"
+
+    alert_state_id: Mapped[UUID] = mapped_column(
+        ForeignKey("operational_alert_states.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    alert_key: Mapped[str] = mapped_column(String(160), nullable=False, index=True)
+    rule_key: Mapped[str] = mapped_column(String(128), nullable=False, index=True)
+    transition_type: Mapped[str] = mapped_column(String(32), nullable=False)
+    status_before: Mapped[str | None] = mapped_column(String(32))
+    status_after: Mapped[str] = mapped_column(String(32), nullable=False)
+    severity: Mapped[str] = mapped_column(String(32), nullable=False)
+    evaluated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    payload: Mapped[dict[str, Any]] = mapped_column(JSONB, default=dict, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+
+
 class AuditEvent(UUIDPrimaryKeyMixin, Base):
     __tablename__ = "audit_events"
 

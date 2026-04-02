@@ -449,6 +449,13 @@ def refresh_stale_evidence(
             retry_ai_review=retry_ai_review,
         )
 
+    from cve_service.services.alerting import evaluate_operational_alerts
+
+    evaluate_operational_alerts(
+        session,
+        evaluated_at=effective_evaluated_at,
+        trigger=f"enrichment.{trigger}",
+    )
     return RefreshRunResult(
         evaluated_at=effective_evaluated_at,
         stale_targets=len(targets),

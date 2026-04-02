@@ -321,6 +321,13 @@ def _publish_prepared(
                 "existing_event_id": successful_duplicate.id,
             },
         )
+        from cve_service.services.alerting import evaluate_operational_alerts
+
+        evaluate_operational_alerts(
+            session,
+            evaluated_at=effective_attempted_at,
+            trigger="publication.duplicate_blocked",
+        )
         session.flush()
         return PublicationResult(
             cve_id=prepared.cve.cve_id,
@@ -425,6 +432,13 @@ def _publish_prepared(
                 "error": str(exc),
             },
         )
+        from cve_service.services.alerting import evaluate_operational_alerts
+
+        evaluate_operational_alerts(
+            session,
+            evaluated_at=effective_attempted_at,
+            trigger="publication.failed",
+        )
         session.flush()
         return PublicationResult(
             cve_id=prepared.cve.cve_id,
@@ -492,6 +506,13 @@ def _publish_prepared(
             "attempt_count": event.attempt_count,
             "external_id": event.external_id,
         },
+    )
+    from cve_service.services.alerting import evaluate_operational_alerts
+
+    evaluate_operational_alerts(
+        session,
+        evaluated_at=event.published_at,
+        trigger="publication.succeeded",
     )
     session.flush()
     return PublicationResult(

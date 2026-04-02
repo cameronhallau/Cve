@@ -10,6 +10,7 @@ from sqlalchemy import create_engine
 from cve_service.core.config import get_settings
 from cve_service.core.db import create_session_factory, session_scope
 from cve_service.services.ai_provider import build_ai_review_provider
+from cve_service.services.alerting import evaluate_operational_alerts
 from cve_service.services.enrichment import refresh_stale_evidence
 from cve_service.services.post_enrichment import process_post_enrichment_workflow
 from cve_service.services.publish_queue import RQPublishJobProducer
@@ -70,6 +71,38 @@ def refresh_stale_evidence_job(
     finally:
         if redis_client is not None:
             redis_client.close()
+        engine.dispose()
+
+
+def evaluate_operational_alerts_job(
+    database_url: str | None = None,
+    *,
+    evaluated_at: str | datetime | None = None,
+    trigger: str = "worker.alert_evaluation",
+) -> dict[str, Any]:
+    settings = get_settings()
+    engine = create_engine(
+        database_url or settings.database_url,
+        pool_pre_ping=True,
+        connect_args={"connect_timeout": int(settings.health_timeout_seconds)},
+    )
+    session_factory = create_session_factory(engine)
+
+    try:
+        with session_scope(session_factory) as session:
+            result = evaluate_operational_alerts(
+                session,
+                evaluated_at=_coerce_datetime(evaluated_at),
+                trigger=trigger,
+            )
+        return {
+            "status": "processed",
+            "evaluated_at": result.evaluated_at.isoformat(),
+            "active_alert_keys": list(result.active_alert_keys),
+            "activated_alert_keys": list(result.activated_alert_keys),
+            "resolved_alert_keys": list(result.resolved_alert_keys),
+        }
+    finally:
         engine.dispose()
 
 

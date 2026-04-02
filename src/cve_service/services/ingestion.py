@@ -240,6 +240,12 @@ def ingest_public_feed_record(
                 actor_type=AuditActorType.SYSTEM,
                 publish_producer=publish_producer,
             )
+        from cve_service.services.alerting import evaluate_operational_alerts
+
+        evaluate_operational_alerts(
+            session,
+            trigger="ingestion.snapshot_created",
+        )
         session.flush()
         return IngestionResult(
             cve_id=cve.cve_id,
@@ -323,6 +329,12 @@ def ingest_public_feed_record(
         },
     )
 
+    from cve_service.services.alerting import evaluate_operational_alerts
+
+    evaluate_operational_alerts(
+        session,
+        trigger="ingestion.snapshot_created",
+    )
     session.flush()
     return IngestionResult(
         cve_id=cve.cve_id,
