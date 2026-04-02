@@ -11,6 +11,18 @@ Use this runbook when initial publish or update publish attempts fail, retry loo
 3. Pause retries if idempotency cannot be proven.
 4. Preserve all related decision and publication events for audit.
 
+## Scheduled Runtime Checks
+
+- confirm whether the failure came from:
+  - continuous `cve-worker` processing
+  - a scheduled stale-refresh rerun that enqueued an update
+  - a previously queued publish attempt replayed after worker recovery
+- keep scheduled ingest, stale-refresh, and alert-evaluation timers running unless they are the fault domain
+- do not blindly rerun publish work from cron or systemd:
+  - the worker already owns publish retries
+  - scheduled refresh jobs may enqueue new work with the same safety checks
+  - reconciliation-required failures must stay fail-closed until the remote state is known
+
 ## X Target Checks
 
 When the publish target is `x`, inspect the publication event `target_response` and `payload_snapshot` before doing anything else.
@@ -27,6 +39,13 @@ When the publish target is `x`, inspect the publication event `target_response` 
 2. If the external post may have occurred, reconcile against the downstream platform before retrying.
 3. If duplicate prevention failed, suppress further retries and create a corrective update task.
 4. Record the final disposition, including whether the incident affected initial publication, update publication, or both.
+
+## Autonomous Runtime Notes
+
+- reconciliation-required X failures are expected to block autonomous progress for that publication event
+- operators must repair or supersede the failed event rather than enqueueing a fresh publish blindly
+- once reconciliation is complete, allow the worker to resume with the existing event lineage and idempotency material
+- if the failure occurred during an update publish, verify that later scheduled stale-refresh runs do not create competing update candidates before the blocked event is resolved
 
 ## Credential Expectations
 
