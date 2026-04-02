@@ -128,7 +128,10 @@ def ingest_public_feed_record(session: Session, record: PublicFeedRecord) -> Ing
                 existing_classification is not None
                 and existing_classification.details.get("ai_route", {}).get("eligible", False)
             ),
-            ai_route_allowed=False,
+            ai_route_allowed=bool(
+                existing_classification is not None
+                and existing_classification.details.get("ai_route", {}).get("allowed", False)
+            ),
             diff_evaluated=False,
             material_change_detected=False,
             diff_changed_fields=(),
@@ -240,7 +243,10 @@ def ingest_public_feed_record(session: Session, record: PublicFeedRecord) -> Ing
                 latest_classification is not None
                 and latest_classification.details.get("ai_route", {}).get("eligible", False)
             ),
-            ai_route_allowed=False,
+            ai_route_allowed=bool(
+                latest_classification is not None
+                and latest_classification.details.get("ai_route", {}).get("allowed", False)
+            ),
             diff_evaluated=True,
             material_change_detected=False,
             diff_changed_fields=diff_result.changed_fields,
@@ -312,7 +318,7 @@ def ingest_public_feed_record(session: Session, record: PublicFeedRecord) -> Ing
         reason_codes=tuple(classification.reason_codes),
         reason_code_registry_version=REASON_CODE_REGISTRY_VERSION,
         ai_route_eligible=classification_result.ai_route_eligible,
-        ai_route_allowed=False,
+        ai_route_allowed=bool(classification_result.details["ai_route"]["allowed"]),
         diff_evaluated=True,
         material_change_detected=previous_snapshot is not None and diff_result.is_material,
         diff_changed_fields=diff_result.changed_fields,

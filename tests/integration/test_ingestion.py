@@ -268,24 +268,24 @@ def test_classifier_persists_before_ai_route_is_considered(session_factory) -> N
     with session_scope(session_factory) as session:
         result = ingest_public_feed_record(session, record)
         stored = session.get(Classification, result.classification_id)
+        cve = session.scalar(select(CVE).where(CVE.cve_id == record.cve_id))
         audit_events = session.scalars(
             select(AuditEvent).where(AuditEvent.event_type == "classification.persisted")
         ).all()
 
     assert result.ai_route_eligible is True
-    assert result.ai_route_allowed is False
+    assert result.ai_route_allowed is True
     assert stored is not None
+    assert cve is not None
     assert stored.outcome is ClassificationOutcome.NEEDS_AI
     assert stored.classifier_version == "deterministic-classifier.v1"
-    assert stored.reason_codes == [
-        "classifier.needs_ai.unknown_product_scope",
-        "classifier.fail_closed.ai_out_of_scope",
-    ]
+    assert stored.reason_codes == ["classifier.needs_ai.unknown_product_scope"]
     assert stored.details["ai_route"] == {
         "eligible": True,
-        "allowed": False,
-        "blocked_reason": "phase1_ai_out_of_scope",
+        "allowed": True,
+        "blocked_reason": None,
     }
+    assert cve.state is CveState.CLASSIFIED
     assert len(audit_events) == 1
     assert audit_events[0].details["outcome"] == "NEEDS_AI"
 

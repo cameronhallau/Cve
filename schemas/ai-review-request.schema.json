@@ -1,0 +1,209 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://example.local/schemas/ai-review-request.schema.json",
+  "title": "AIReviewRequest",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "prompt_version",
+    "generated_at",
+    "cve_id",
+    "severity",
+    "deterministic",
+    "evidence",
+    "task"
+  ],
+  "properties": {
+    "schema_version": {
+      "type": "string",
+      "const": "phase3-ai-review-request.v1"
+    },
+    "prompt_version": {
+      "type": "string"
+    },
+    "generated_at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "cve_id": {
+      "type": "string",
+      "pattern": "^CVE-[0-9]{4}-[0-9]{4,}$"
+    },
+    "title": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "maxLength": 512
+    },
+    "description": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "maxLength": 12000
+    },
+    "severity": {
+      "type": "string",
+      "enum": [
+        "HIGH",
+        "CRITICAL"
+      ]
+    },
+    "source_modified_at": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "format": "date-time"
+    },
+    "deterministic": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "outcome",
+        "confidence",
+        "reason_codes",
+        "product_scope",
+        "canonical_name",
+        "ai_route"
+      ],
+      "properties": {
+        "outcome": {
+          "type": "string",
+          "enum": [
+            "CANDIDATE",
+            "DENY",
+            "NEEDS_AI",
+            "DEFER"
+          ]
+        },
+        "confidence": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "minimum": 0,
+          "maximum": 1
+        },
+        "reason_codes": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "product_scope": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "canonical_name": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "ai_route": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "eligible",
+            "allowed",
+            "blocked_reason"
+          ],
+          "properties": {
+            "eligible": {
+              "type": "boolean"
+            },
+            "allowed": {
+              "type": "boolean"
+            },
+            "blocked_reason": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          }
+        }
+      }
+    },
+    "evidence": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "poc_status",
+        "poc_confidence",
+        "itw_status",
+        "itw_confidence"
+      ],
+      "properties": {
+        "poc_status": {
+          "type": "string",
+          "enum": [
+            "UNKNOWN",
+            "ABSENT",
+            "PRESENT"
+          ]
+        },
+        "poc_confidence": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "minimum": 0,
+          "maximum": 1
+        },
+        "itw_status": {
+          "type": "string",
+          "enum": [
+            "UNKNOWN",
+            "ABSENT",
+            "PRESENT"
+          ]
+        },
+        "itw_confidence": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "minimum": 0,
+          "maximum": 1
+        }
+      }
+    },
+    "task": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "review_focus",
+        "allowed_output_fields",
+        "constraints"
+      ],
+      "properties": {
+        "review_focus": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 2000
+        },
+        "allowed_output_fields": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "minItems": 4,
+          "uniqueItems": true
+        },
+        "constraints": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "minItems": 1
+        }
+      }
+    }
+  }
+}

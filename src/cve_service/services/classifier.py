@@ -11,7 +11,6 @@ from cve_service.services.product_registry import (
 from cve_service.services.reason_codes import REASON_CODE_REGISTRY_VERSION, validate_reason_codes
 
 CLASSIFIER_VERSION = "deterministic-classifier.v1"
-AI_BLOCK_REASON = "phase1_ai_out_of_scope"
 
 
 @dataclass(frozen=True, slots=True)
@@ -89,8 +88,8 @@ def classify_record(severity: str | None, product: CanonicalProduct) -> Classifi
         return ClassificationResult(
             outcome=ClassificationOutcome.NEEDS_AI,
             confidence=0.35,
-            reason_codes=tuple(reason_codes),
-            next_state=CveState.SUPPRESSED,
+            reason_codes=("classifier.needs_ai.unknown_product_scope",),
+            next_state=CveState.CLASSIFIED,
             ai_route_eligible=True,
             details={
                 "classifier_version": CLASSIFIER_VERSION,
@@ -103,7 +102,7 @@ def classify_record(severity: str | None, product: CanonicalProduct) -> Classifi
                 "matched_vendor_alias": product.matched_vendor_alias,
                 "matched_product_alias": product.matched_product_alias,
                 "severity": normalized_severity,
-                "ai_route": {"eligible": True, "allowed": False, "blocked_reason": AI_BLOCK_REASON},
+                "ai_route": {"eligible": True, "allowed": True, "blocked_reason": None},
             },
         )
 

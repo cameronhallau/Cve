@@ -32,10 +32,10 @@ def test_classifier_fail_closes_ambiguous_products_before_ai() -> None:
     result = classify_record("HIGH", product)
 
     assert result.outcome is ClassificationOutcome.NEEDS_AI
-    assert result.next_state is CveState.SUPPRESSED
+    assert result.next_state is CveState.CLASSIFIED
     assert result.ai_route_eligible is True
     assert result.details["ai_route"] == {
         "eligible": True,
-        "allowed": False,
-        "blocked_reason": "phase1_ai_out_of_scope",
+        "allowed": True,
+        "blocked_reason": None,
     }
