@@ -39,6 +39,8 @@ Checked-in deployment artifacts:
 
 - environment template:
   - [.env.production.example](/home/cam/Documents/Github/Vuln/Cve/.env.production.example)
+- first-rollout checklist:
+  - [DEPLOY.md](/home/cam/Documents/Github/Vuln/Cve/DEPLOY.md)
 - systemd units:
   - [systemd/README.md](/home/cam/Documents/Github/Vuln/Cve/systemd/README.md)
 

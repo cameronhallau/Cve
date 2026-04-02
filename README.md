@@ -30,6 +30,7 @@ The current implementation is the Phase 0 foundation on the Python, FastAPI, Pos
 Environment defaults live in [.env.example](/home/cam/Documents/Github/Vuln/Cve/.env.example).
 
 Production deployment defaults live in [.env.production.example](/home/cam/Documents/Github/Vuln/Cve/.env.production.example).
+First-rollout checklist lives in [DEPLOY.md](/home/cam/Documents/Github/Vuln/Cve/DEPLOY.md).
 
 ### Publish Target Selection
 
