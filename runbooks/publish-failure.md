@@ -11,9 +11,28 @@ Use this runbook when initial publish or update publish attempts fail, retry loo
 3. Pause retries if idempotency cannot be proven.
 4. Preserve all related decision and publication events for audit.
 
+## X Target Checks
+
+When the publish target is `x`, inspect the publication event `target_response` and `payload_snapshot` before doing anything else.
+
+1. Confirm `failure_category`, `retryable`, `rate_limited`, and `requires_reconciliation`.
+2. If `requires_reconciliation=true`, do not rerun the publication job until the remote thread is reconciled.
+3. Compare the stored `external_id`, `root_post_id`, `post_ids`, and any `partial_post_ids` against the live X account history.
+4. If the failed event was an update publish, verify that the baseline publication event still carries the correct X `external_id` for reply threading.
+5. Check the most recent X rate-limit headers and `retry_after_seconds` before scheduling any retry.
+
 ## Recovery
 
 1. If the external post definitely did not occur, resume retry with the existing idempotency key.
 2. If the external post may have occurred, reconcile against the downstream platform before retrying.
 3. If duplicate prevention failed, suppress further retries and create a corrective update task.
 4. Record the final disposition, including whether the incident affected initial publication, update publication, or both.
+
+## Credential Expectations
+
+- `CVE_PUBLISH_TARGET_NAME=x` is opt-in and should only be enabled after credentials are present.
+- Supported auth modes:
+  - `oauth1_user`: `CVE_X_CONSUMER_KEY`, `CVE_X_CONSUMER_SECRET`, `CVE_X_ACCESS_TOKEN`, `CVE_X_ACCESS_TOKEN_SECRET`
+  - `oauth2_bearer`: `CVE_X_BEARER_TOKEN`
+- Startup fails fast when X mode is enabled but the required credentials are missing.
+- Do not place secrets in code, fixtures, or committed config files. Use environment injection only.

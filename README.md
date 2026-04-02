@@ -29,6 +29,18 @@ The current implementation is the Phase 0 foundation on the Python, FastAPI, Pos
 
 Environment defaults live in [.env.example](/home/cam/Documents/Github/Vuln/Cve/.env.example).
 
+### Publish Target Selection
+
+The publish path stays opt-in and defaults to `console`.
+
+- Set `CVE_PUBLISH_TARGET_NAME=x` to enable the real X target.
+- When `x` is enabled, startup fails fast unless one complete auth mode is configured.
+- Supported auth modes:
+  - `CVE_X_AUTH_MODE=oauth1_user` with `CVE_X_CONSUMER_KEY`, `CVE_X_CONSUMER_SECRET`, `CVE_X_ACCESS_TOKEN`, and `CVE_X_ACCESS_TOKEN_SECRET`
+  - `CVE_X_AUTH_MODE=oauth2_bearer` with `CVE_X_BEARER_TOKEN`
+- The X target is isolated behind the existing publish target abstraction, so `console`, `inline`, and in-memory test targets continue to work unchanged.
+- Update publications on X reply to the stored baseline X post ID. If the baseline remote ID is missing, the worker fails closed and marks the event for reconciliation instead of retrying blindly.
+
 ### Bootstrapping
 
 ```bash
