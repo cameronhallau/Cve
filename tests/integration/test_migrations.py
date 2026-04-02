@@ -7,6 +7,7 @@ EXPECTED_TABLES = {
     "ai_reviews",
     "audit_events",
     "classifications",
+    "cve_ingestion_snapshots",
     "cves",
     "evidence",
     "policy_decisions",

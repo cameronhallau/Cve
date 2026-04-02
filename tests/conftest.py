@@ -8,8 +8,10 @@ import pytest
 from alembic.config import Config
 from sqlalchemy import create_engine, text
 from sqlalchemy.engine import URL, make_url
+from sqlalchemy.orm import sessionmaker
 
 from cve_service.core.config import Settings
+from cve_service.core.db import create_session_factory
 
 ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_DATABASE_URL = "postgresql+psycopg://cve:cve@localhost:55432/cve_service"
@@ -79,3 +81,20 @@ def phase0_settings(temp_database_url: str, redis_url: str) -> Settings:
         rq_queue_name=f"phase0-test-{uuid4().hex}",
         health_timeout_seconds=2.0,
     )
+
+
+@pytest.fixture
+def migrated_engine(alembic_config: Config, temp_database_url: str):
+    from alembic import command
+
+    command.upgrade(alembic_config, "head")
+    engine = create_engine(temp_database_url)
+    try:
+        yield engine
+    finally:
+        engine.dispose()
+
+
+@pytest.fixture
+def session_factory(migrated_engine) -> sessionmaker:
+    return create_session_factory(migrated_engine)

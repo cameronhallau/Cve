@@ -4,7 +4,7 @@ from datetime import datetime
 from typing import Any
 from uuid import UUID
 
-from sqlalchemy import Boolean, DateTime, Enum, Float, ForeignKey, String, Text, func
+from sqlalchemy import Boolean, DateTime, Enum, Float, ForeignKey, Integer, String, Text, UniqueConstraint, func
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -57,11 +57,32 @@ class CVE(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     last_decision_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
     classifications: Mapped[list["Classification"]] = relationship(back_populates="cve")
+    ingestion_snapshots: Mapped[list["CVEIngestionSnapshot"]] = relationship(back_populates="cve")
     evidence_items: Mapped[list["Evidence"]] = relationship(back_populates="cve")
     ai_reviews: Mapped[list["AIReview"]] = relationship(back_populates="cve")
     policy_decisions: Mapped[list["PolicyDecision"]] = relationship(back_populates="cve")
     publication_events: Mapped[list["PublicationEvent"]] = relationship(back_populates="cve")
     audit_events: Mapped[list["AuditEvent"]] = relationship(back_populates="cve")
+
+
+class CVEIngestionSnapshot(UUIDPrimaryKeyMixin, Base):
+    __tablename__ = "cve_ingestion_snapshots"
+    __table_args__ = (
+        UniqueConstraint("cve_id", "source_name", "payload_hash", name="uq_cve_ingestion_snapshots_identity"),
+        UniqueConstraint("cve_id", "snapshot_index", name="uq_cve_ingestion_snapshots_index"),
+    )
+
+    cve_id: Mapped[UUID] = mapped_column(ForeignKey("cves.id", ondelete="CASCADE"), nullable=False)
+    source_name: Mapped[str] = mapped_column(String(128), nullable=False)
+    source_record_id: Mapped[str | None] = mapped_column(String(128))
+    snapshot_index: Mapped[int] = mapped_column(Integer(), nullable=False)
+    payload_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    source_modified_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    raw_payload: Mapped[dict[str, Any]] = mapped_column(JSONB, default=dict, nullable=False)
+    normalized_payload: Mapped[dict[str, Any]] = mapped_column(JSONB, default=dict, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+
+    cve: Mapped[CVE] = relationship(back_populates="ingestion_snapshots")
 
 
 class Classification(UUIDPrimaryKeyMixin, Base):
