@@ -5,9 +5,15 @@ from datetime import UTC, datetime
 from sqlalchemy import select
 
 from cve_service.core.db import session_scope
-from cve_service.models.entities import CVE, Evidence
-from cve_service.models.enums import EvidenceSignal, EvidenceSourceType, EvidenceStatus
-from cve_service.services.enrichment import EvidenceInput, compute_enrichment_summary, record_evidence
+from cve_service.models.entities import AuditEvent, CVE, Evidence
+from cve_service.models.enums import AuditActorType, EvidenceSignal, EvidenceSourceType, EvidenceStatus
+from cve_service.services.enrichment import (
+    EvidenceInput,
+    compute_enrichment_summary,
+    find_stale_evidence_targets,
+    record_evidence,
+    refresh_stale_evidence,
+)
 from cve_service.services.evidence_adapters import (
     KevEvidence,
     TrustedItwEvidence,
@@ -221,6 +227,220 @@ def test_low_confidence_evidence_fails_closed_and_summary_is_deterministic(sessi
     assert cve is not None
     assert cve.itw_status is EvidenceStatus.UNKNOWN
     assert cve.itw_confidence is None
+
+
+def test_stale_evidence_targets_are_detected_for_aging_signal_only(session_factory) -> None:
+    with session_scope(session_factory) as session:
+        ingest_public_feed_record(session, _record("CVE-2026-0204"))
+        ingest_public_feed_record(session, _record("CVE-2026-0205"))
+
+        record_evidence(
+            session,
+            EvidenceInput(
+                cve_id="CVE-2026-0204",
+                signal_type=EvidenceSignal.POC,
+                status=EvidenceStatus.PRESENT,
+                source_name="trusted-poc-db",
+                source_type=EvidenceSourceType.TRUSTED_POC,
+                source_record_id="aging-poc-2026-0204",
+                evidence_timestamp=datetime(2026, 4, 2, 10, 0, tzinfo=UTC),
+                collected_at=datetime(2026, 4, 2, 10, 0, tzinfo=UTC),
+                freshness_ttl_seconds=60 * 60,
+                confidence=0.91,
+                confidence_inputs={"base_confidence": 0.91},
+            ),
+        )
+        record_evidence(
+            session,
+            EvidenceInput(
+                cve_id="CVE-2026-0205",
+                signal_type=EvidenceSignal.POC,
+                status=EvidenceStatus.PRESENT,
+                source_name="trusted-poc-db",
+                source_type=EvidenceSourceType.TRUSTED_POC,
+                source_record_id="fresh-poc-2026-0205",
+                evidence_timestamp=datetime(2026, 4, 2, 12, 0, tzinfo=UTC),
+                collected_at=datetime(2026, 4, 2, 12, 0, tzinfo=UTC),
+                freshness_ttl_seconds=4 * 60 * 60,
+                confidence=0.92,
+                confidence_inputs={"base_confidence": 0.92},
+            ),
+        )
+
+        targets = find_stale_evidence_targets(
+            session,
+            evaluated_at=datetime(2026, 4, 2, 12, 30, tzinfo=UTC),
+        )
+
+    assert [(target.cve_id, target.signal_type) for target in targets] == [
+        ("CVE-2026-0204", EvidenceSignal.POC),
+    ]
+    assert targets[0].stale_records == 1
+    assert targets[0].fresh_records == 0
+    assert targets[0].qualified_records == 0
+
+
+def test_refresh_stale_evidence_recomputes_summary_and_keeps_signals_separate(session_factory) -> None:
+    with session_scope(session_factory) as session:
+        ingest_public_feed_record(session, _record("CVE-2026-0206"))
+
+        record_evidence(
+            session,
+            EvidenceInput(
+                cve_id="CVE-2026-0206",
+                signal_type=EvidenceSignal.POC,
+                status=EvidenceStatus.PRESENT,
+                source_name="trusted-poc-db",
+                source_type=EvidenceSourceType.TRUSTED_POC,
+                source_record_id="aging-poc-2026-0206",
+                evidence_timestamp=datetime(2026, 4, 2, 10, 0, tzinfo=UTC),
+                collected_at=datetime(2026, 4, 2, 10, 0, tzinfo=UTC),
+                freshness_ttl_seconds=60 * 60,
+                confidence=0.96,
+                confidence_inputs={"base_confidence": 0.96},
+            ),
+        )
+        record_evidence(
+            session,
+            EvidenceInput(
+                cve_id="CVE-2026-0206",
+                signal_type=EvidenceSignal.ITW,
+                status=EvidenceStatus.PRESENT,
+                source_name="trusted-itw-feed",
+                source_type=EvidenceSourceType.TRUSTED_ITW,
+                source_record_id="fresh-itw-2026-0206",
+                evidence_timestamp=datetime(2026, 4, 2, 12, 15, tzinfo=UTC),
+                collected_at=datetime(2026, 4, 2, 12, 15, tzinfo=UTC),
+                freshness_ttl_seconds=14 * 24 * 60 * 60,
+                confidence=0.84,
+                confidence_inputs={"base_confidence": 0.84},
+            ),
+        )
+
+        result = refresh_stale_evidence(
+            session,
+            evaluated_at=datetime(2026, 4, 2, 12, 30, tzinfo=UTC),
+        )
+        cve = session.scalar(select(CVE).where(CVE.cve_id == "CVE-2026-0206"))
+        evidence_items = session.scalars(select(Evidence).order_by(Evidence.signal_type.asc(), Evidence.created_at.asc())).all()
+        audit_events = session.scalars(
+            select(AuditEvent)
+            .where(AuditEvent.cve_id == cve.id)
+            .order_by(AuditEvent.created_at.asc(), AuditEvent.id.asc())
+        ).all()
+
+    assert result.stale_targets == 1
+    assert result.recomputed_cves == 1
+    assert result.cve_ids == ("CVE-2026-0206",)
+    assert cve is not None
+    assert cve.poc_status is EvidenceStatus.UNKNOWN
+    assert cve.poc_confidence is None
+    assert cve.itw_status is EvidenceStatus.PRESENT
+    assert cve.itw_confidence == 0.84
+    assert len(evidence_items) == 2
+
+    refresh_event = next(event for event in audit_events if event.event_type == "enrichment.refresh_evaluated")
+    summary_event = next(
+        event
+        for event in audit_events
+        if event.event_type == "enrichment.summary_computed" and event.details["trigger"] == "stale_refresh"
+    )
+    assert refresh_event.actor_type is AuditActorType.WORKER
+    assert refresh_event.details["signal_type"] == "POC"
+    assert refresh_event.details["stale_records"] == 1
+    assert refresh_event.details["action"] == "reevaluate_summary"
+    assert summary_event.event_type == "enrichment.summary_computed"
+    assert summary_event.details["trigger"] == "stale_refresh"
+    assert summary_event.details["poc"]["status"] == "UNKNOWN"
+    assert summary_event.details["poc"]["stale_records"] == 1
+    assert summary_event.details["itw"]["status"] == "PRESENT"
+    assert summary_event.details["itw"]["selected_source_record_id"] == "fresh-itw-2026-0206"
+
+
+def test_conflicting_fresh_evidence_resolution_is_logged_and_reproducible(session_factory) -> None:
+    with session_scope(session_factory) as session:
+        ingest_public_feed_record(session, _record("CVE-2026-0207"))
+
+        record_evidence(
+            session,
+            EvidenceInput(
+                cve_id="CVE-2026-0207",
+                signal_type=EvidenceSignal.POC,
+                status=EvidenceStatus.PRESENT,
+                source_name="trusted-poc-db",
+                source_type=EvidenceSourceType.TRUSTED_POC,
+                source_record_id="poc-present-2026-0207",
+                evidence_timestamp=datetime(2026, 4, 2, 15, 0, tzinfo=UTC),
+                collected_at=datetime(2026, 4, 2, 15, 0, tzinfo=UTC),
+                freshness_ttl_seconds=14 * 24 * 60 * 60,
+                confidence=0.88,
+                confidence_inputs={"base_confidence": 0.88},
+            ),
+        )
+        record_evidence(
+            session,
+            EvidenceInput(
+                cve_id="CVE-2026-0207",
+                signal_type=EvidenceSignal.POC,
+                status=EvidenceStatus.ABSENT,
+                source_name="Microsoft",
+                source_type=EvidenceSourceType.VENDOR_ADVISORY,
+                source_record_id="poc-absent-2026-0207",
+                evidence_timestamp=datetime(2026, 4, 2, 15, 5, tzinfo=UTC),
+                collected_at=datetime(2026, 4, 2, 15, 5, tzinfo=UTC),
+                freshness_ttl_seconds=14 * 24 * 60 * 60,
+                confidence=0.93,
+                is_authoritative=True,
+                confidence_inputs={"base_confidence": 0.93},
+            ),
+        )
+
+        first_summary = compute_enrichment_summary(
+            session,
+            "CVE-2026-0207",
+            evaluated_at=datetime(2026, 4, 2, 15, 10, tzinfo=UTC),
+        )
+        second_summary = compute_enrichment_summary(
+            session,
+            "CVE-2026-0207",
+            evaluated_at=datetime(2026, 4, 2, 15, 10, tzinfo=UTC),
+        )
+        cve = session.scalar(select(CVE).where(CVE.cve_id == "CVE-2026-0207"))
+        conflict_events = session.scalars(
+            select(AuditEvent)
+            .where(
+                AuditEvent.cve_id == cve.id,
+                AuditEvent.event_type == "enrichment.signal_conflict_detected",
+            )
+            .order_by(AuditEvent.created_at.asc(), AuditEvent.id.asc())
+        ).all()
+
+    assert first_summary == second_summary
+    assert cve is not None
+    assert cve.poc_status is EvidenceStatus.ABSENT
+    assert cve.poc_confidence == 0.93
+    assert len(conflict_events) >= 1
+    latest_conflict_event = conflict_events[-1]
+    assert latest_conflict_event.details["signal_type"] == "POC"
+    assert latest_conflict_event.details["selected_status"] == "ABSENT"
+    assert latest_conflict_event.details["selected_source_record_id"] == "poc-absent-2026-0207"
+    assert latest_conflict_event.details["conflicting_records"] == [
+        {
+            "signal_type": "POC",
+            "status": "PRESENT",
+            "source_type": "TRUSTED_POC",
+            "source_name": "trusted-poc-db",
+            "source_record_id": "poc-present-2026-0207",
+            "evidence_timestamp": "2026-04-02T15:00:00+00:00",
+            "collected_at": "2026-04-02T15:00:00+00:00",
+            "freshness_ttl_seconds": 1209600,
+            "confidence": 0.88,
+            "is_authoritative": False,
+            "created_at": latest_conflict_event.details["conflicting_records"][0]["created_at"],
+            "is_fresh": True,
+            "is_qualified": True,
+        }
+    ]
 
 
 def _record(cve_id: str) -> PublicFeedRecord:

@@ -68,6 +68,29 @@ class SignalSummaryComputation:
     fresh_records: int
     qualified_records: int
     stale_records: int
+    conflicting_records: tuple[SignalEvidenceRecord, ...] = ()
+
+
+@dataclass(frozen=True, slots=True)
+class StaleEvidenceTarget:
+    cve_id: str
+    signal_type: EvidenceSignal
+    evaluated_at: datetime
+    considered_records: int
+    fresh_records: int
+    stale_records: int
+    qualified_records: int
+    selected_source_type: EvidenceSourceType | None
+    selected_source_name: str | None
+    selected_source_record_id: str | None
+
+
+@dataclass(frozen=True, slots=True)
+class RefreshRunResult:
+    evaluated_at: datetime
+    stale_targets: int
+    recomputed_cves: int
+    cve_ids: tuple[str, ...]
 
 
 def record_evidence(session: Session, evidence_input: EvidenceInput) -> Evidence:
@@ -134,30 +157,41 @@ def record_evidence(session: Session, evidence_input: EvidenceInput) -> Evidence
             },
         )
 
-    compute_enrichment_summary(session, evidence_input.cve_id)
+    compute_enrichment_summary(
+        session,
+        evidence_input.cve_id,
+        evaluated_at=normalized_input.collected_at,
+        trigger="evidence_upsert",
+    )
     return evidence
 
 
-def compute_enrichment_summary(session: Session, cve_id: str) -> EnrichmentSummary:
+def compute_enrichment_summary(
+    session: Session,
+    cve_id: str,
+    *,
+    evaluated_at: datetime | None = None,
+    trigger: str = "manual_recompute",
+    actor_type: AuditActorType = AuditActorType.SYSTEM,
+) -> EnrichmentSummary:
     cve = _get_cve_by_public_id(session, cve_id)
     evidence_items = session.scalars(
         select(Evidence).where(Evidence.cve_id == cve.id).order_by(Evidence.created_at.asc(), Evidence.id.asc())
     ).all()
+    normalized_evaluated_at = _normalize_datetime(evaluated_at)
 
-    poc_summary = summarize_signal_evidence(
-        [
-            _as_signal_record(evidence)
-            for evidence in evidence_items
-            if evidence.signal_type == EvidenceSignal.POC
-        ]
-    )
-    itw_summary = summarize_signal_evidence(
-        [
-            _as_signal_record(evidence)
-            for evidence in evidence_items
-            if evidence.signal_type == EvidenceSignal.ITW
-        ]
-    )
+    poc_records = [
+        _as_signal_record(evidence)
+        for evidence in evidence_items
+        if evidence.signal_type == EvidenceSignal.POC
+    ]
+    itw_records = [
+        _as_signal_record(evidence)
+        for evidence in evidence_items
+        if evidence.signal_type == EvidenceSignal.ITW
+    ]
+    poc_summary = summarize_signal_evidence(poc_records, evaluated_at=normalized_evaluated_at)
+    itw_summary = summarize_signal_evidence(itw_records, evaluated_at=normalized_evaluated_at)
 
     cve.poc_status = poc_summary.status
     cve.poc_confidence = poc_summary.confidence
@@ -165,23 +199,35 @@ def compute_enrichment_summary(session: Session, cve_id: str) -> EnrichmentSumma
     cve.itw_confidence = itw_summary.confidence
     session.flush()
 
-    session.add(
-        AuditEvent(
-            cve_id=cve.id,
-            entity_type="cve",
-            entity_id=cve.id,
-            actor_type=AuditActorType.SYSTEM,
-            actor_id=None,
-            event_type="enrichment.summary_computed",
-            state_before=cve.state,
-            state_after=cve.state,
-            details={
-                "poc": _serialize_signal_summary(poc_summary),
-                "itw": _serialize_signal_summary(itw_summary),
-            },
-        )
+    _write_cve_audit_event(
+        session,
+        cve=cve,
+        actor_type=actor_type,
+        event_type="enrichment.summary_computed",
+        details={
+            "trigger": trigger,
+            "requested_evaluated_at": _serialize_datetime(normalized_evaluated_at),
+            "poc": _serialize_signal_audit(poc_summary, poc_records),
+            "itw": _serialize_signal_audit(itw_summary, itw_records),
+        },
     )
-    session.flush()
+
+    _write_conflict_audit_events(
+        session,
+        cve=cve,
+        actor_type=actor_type,
+        trigger=trigger,
+        signal_type=EvidenceSignal.POC,
+        summary=poc_summary,
+    )
+    _write_conflict_audit_events(
+        session,
+        cve=cve,
+        actor_type=actor_type,
+        trigger=trigger,
+        signal_type=EvidenceSignal.ITW,
+        summary=itw_summary,
+    )
 
     return EnrichmentSummary(
         cve_id=cve.cve_id,
@@ -192,7 +238,12 @@ def compute_enrichment_summary(session: Session, cve_id: str) -> EnrichmentSumma
     )
 
 
-def summarize_signal_evidence(evidence_items: Sequence[SignalEvidenceRecord]) -> SignalSummaryComputation:
+def summarize_signal_evidence(
+    evidence_items: Sequence[SignalEvidenceRecord],
+    *,
+    evaluated_at: datetime | None = None,
+) -> SignalSummaryComputation:
+    normalized_evaluated_at = _normalize_datetime(evaluated_at)
     if not evidence_items:
         return SignalSummaryComputation(
             status=EvidenceStatus.UNKNOWN,
@@ -200,15 +251,15 @@ def summarize_signal_evidence(evidence_items: Sequence[SignalEvidenceRecord]) ->
             selected_source_type=None,
             selected_source_name=None,
             selected_source_record_id=None,
-            evaluated_at=None,
+            evaluated_at=normalized_evaluated_at,
             considered_records=0,
             fresh_records=0,
             qualified_records=0,
             stale_records=0,
         )
 
-    evaluated_at = max(item.collected_at for item in evidence_items)
-    fresh_records = [item for item in evidence_items if _is_fresh(item, evaluated_at)]
+    effective_evaluated_at = normalized_evaluated_at or max(item.collected_at for item in evidence_items)
+    fresh_records = [item for item in evidence_items if _is_fresh(item, effective_evaluated_at)]
     qualified_records = [item for item in fresh_records if _is_confident(item)]
 
     if not qualified_records:
@@ -218,7 +269,7 @@ def summarize_signal_evidence(evidence_items: Sequence[SignalEvidenceRecord]) ->
             selected_source_type=None,
             selected_source_name=None,
             selected_source_record_id=None,
-            evaluated_at=evaluated_at,
+            evaluated_at=effective_evaluated_at,
             considered_records=len(evidence_items),
             fresh_records=len(fresh_records),
             qualified_records=0,
@@ -226,17 +277,117 @@ def summarize_signal_evidence(evidence_items: Sequence[SignalEvidenceRecord]) ->
         )
 
     selected = sorted(qualified_records, key=_signal_sort_key, reverse=True)[0]
+    conflicting_records = tuple(
+        record for record in qualified_records if record.source_record_id != selected.source_record_id and record.status != selected.status
+    )
     return SignalSummaryComputation(
         status=selected.status,
         confidence=selected.confidence,
         selected_source_type=selected.source_type,
         selected_source_name=selected.source_name,
         selected_source_record_id=selected.source_record_id,
-        evaluated_at=evaluated_at,
+        evaluated_at=effective_evaluated_at,
         considered_records=len(evidence_items),
         fresh_records=len(fresh_records),
         qualified_records=len(qualified_records),
         stale_records=len(evidence_items) - len(fresh_records),
+        conflicting_records=conflicting_records,
+    )
+
+
+def find_stale_evidence_targets(
+    session: Session,
+    *,
+    evaluated_at: datetime | None = None,
+    limit: int | None = None,
+) -> list[StaleEvidenceTarget]:
+    effective_evaluated_at = _normalize_datetime(evaluated_at) or datetime.now(UTC)
+    evidence_items = session.execute(
+        select(CVE.cve_id, Evidence)
+        .join(Evidence, Evidence.cve_id == CVE.id)
+        .order_by(CVE.cve_id.asc(), Evidence.signal_type.asc(), Evidence.created_at.asc(), Evidence.id.asc())
+    ).all()
+
+    grouped_records: dict[tuple[str, EvidenceSignal], list[SignalEvidenceRecord]] = {}
+    for public_cve_id, evidence in evidence_items:
+        grouped_records.setdefault((public_cve_id, evidence.signal_type), []).append(_as_signal_record(evidence))
+
+    targets: list[StaleEvidenceTarget] = []
+    for (public_cve_id, signal_type), records in grouped_records.items():
+        summary = summarize_signal_evidence(records, evaluated_at=effective_evaluated_at)
+        if summary.stale_records == 0:
+            continue
+        targets.append(
+            StaleEvidenceTarget(
+                cve_id=public_cve_id,
+                signal_type=signal_type,
+                evaluated_at=effective_evaluated_at,
+                considered_records=summary.considered_records,
+                fresh_records=summary.fresh_records,
+                stale_records=summary.stale_records,
+                qualified_records=summary.qualified_records,
+                selected_source_type=summary.selected_source_type,
+                selected_source_name=summary.selected_source_name,
+                selected_source_record_id=summary.selected_source_record_id,
+            )
+        )
+
+    targets.sort(key=lambda target: (target.cve_id, target.signal_type.value))
+    if limit is not None:
+        return targets[:limit]
+    return targets
+
+
+def refresh_stale_evidence(
+    session: Session,
+    *,
+    evaluated_at: datetime | None = None,
+    limit: int | None = None,
+    actor_type: AuditActorType = AuditActorType.WORKER,
+    trigger: str = "stale_refresh",
+) -> RefreshRunResult:
+    effective_evaluated_at = _normalize_datetime(evaluated_at) or datetime.now(UTC)
+    targets = find_stale_evidence_targets(session, evaluated_at=effective_evaluated_at, limit=limit)
+    recompute_cve_ids: list[str] = []
+
+    for target in targets:
+        cve = _get_cve_by_public_id(session, target.cve_id)
+        _write_cve_audit_event(
+            session,
+            cve=cve,
+            actor_type=actor_type,
+            event_type="enrichment.refresh_evaluated",
+            details={
+                "trigger": trigger,
+                "signal_type": target.signal_type.value,
+                "evaluated_at": _serialize_datetime(target.evaluated_at),
+                "considered_records": target.considered_records,
+                "fresh_records": target.fresh_records,
+                "qualified_records": target.qualified_records,
+                "stale_records": target.stale_records,
+                "selected_source_type": target.selected_source_type.value if target.selected_source_type is not None else None,
+                "selected_source_name": target.selected_source_name,
+                "selected_source_record_id": target.selected_source_record_id,
+                "action": "reevaluate_summary",
+            },
+        )
+        if target.cve_id not in recompute_cve_ids:
+            recompute_cve_ids.append(target.cve_id)
+
+    for cve_id in recompute_cve_ids:
+        compute_enrichment_summary(
+            session,
+            cve_id,
+            evaluated_at=effective_evaluated_at,
+            trigger=trigger,
+            actor_type=actor_type,
+        )
+
+    return RefreshRunResult(
+        evaluated_at=effective_evaluated_at,
+        stale_targets=len(targets),
+        recomputed_cves=len(recompute_cve_ids),
+        cve_ids=tuple(recompute_cve_ids),
     )
 
 
@@ -368,6 +519,43 @@ def _serialize_signal_summary(summary: SignalSummaryComputation) -> dict[str, An
         "fresh_records": summary.fresh_records,
         "qualified_records": summary.qualified_records,
         "stale_records": summary.stale_records,
+        "conflicting_records": [
+            _serialize_signal_record(record, evaluated_at=summary.evaluated_at)
+            for record in summary.conflicting_records
+        ],
+    }
+
+
+def _serialize_signal_audit(
+    summary: SignalSummaryComputation,
+    records: Sequence[SignalEvidenceRecord],
+) -> dict[str, Any]:
+    return {
+        **_serialize_signal_summary(summary),
+        "records": [_serialize_signal_record(record, evaluated_at=summary.evaluated_at) for record in records],
+    }
+
+
+def _serialize_signal_record(
+    record: SignalEvidenceRecord,
+    *,
+    evaluated_at: datetime | None,
+) -> dict[str, Any]:
+    is_fresh = True if evaluated_at is None else _is_fresh(record, evaluated_at)
+    return {
+        "signal_type": record.signal_type.value,
+        "status": record.status.value,
+        "source_type": record.source_type.value,
+        "source_name": record.source_name,
+        "source_record_id": record.source_record_id,
+        "evidence_timestamp": _serialize_datetime(record.evidence_timestamp),
+        "collected_at": _serialize_datetime(record.collected_at),
+        "freshness_ttl_seconds": record.freshness_ttl_seconds,
+        "confidence": record.confidence,
+        "is_authoritative": record.is_authoritative,
+        "created_at": _serialize_datetime(record.created_at),
+        "is_fresh": is_fresh,
+        "is_qualified": is_fresh and _is_confident(record),
     }
 
 
@@ -393,6 +581,63 @@ def _write_evidence_audit_event(
         )
     )
     session.flush()
+
+
+def _write_cve_audit_event(
+    session: Session,
+    *,
+    cve: CVE,
+    event_type: str,
+    details: dict[str, Any],
+    actor_type: AuditActorType = AuditActorType.SYSTEM,
+) -> None:
+    session.add(
+        AuditEvent(
+            cve_id=cve.id,
+            entity_type="cve",
+            entity_id=cve.id,
+            actor_type=actor_type,
+            actor_id=None,
+            event_type=event_type,
+            state_before=cve.state,
+            state_after=cve.state,
+            details=details,
+        )
+    )
+    session.flush()
+
+
+def _write_conflict_audit_events(
+    session: Session,
+    *,
+    cve: CVE,
+    signal_type: EvidenceSignal,
+    summary: SignalSummaryComputation,
+    trigger: str,
+    actor_type: AuditActorType,
+) -> None:
+    if not summary.conflicting_records:
+        return
+
+    _write_cve_audit_event(
+        session,
+        cve=cve,
+        actor_type=actor_type,
+        event_type="enrichment.signal_conflict_detected",
+        details={
+            "trigger": trigger,
+            "signal_type": signal_type.value,
+            "evaluated_at": _serialize_datetime(summary.evaluated_at),
+            "selected_status": summary.status.value,
+            "selected_source_type": summary.selected_source_type.value if summary.selected_source_type is not None else None,
+            "selected_source_name": summary.selected_source_name,
+            "selected_source_record_id": summary.selected_source_record_id,
+            "conflicting_records": [
+                _serialize_signal_record(record, evaluated_at=summary.evaluated_at)
+                for record in summary.conflicting_records
+            ],
+        },
+    )
 
 
 def _normalize_datetime(value: datetime | None) -> datetime | None:
