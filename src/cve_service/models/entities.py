@@ -18,6 +18,7 @@ from cve_service.models.enums import (
     EvidenceSourceType,
     EvidenceStatus,
     PolicyDecisionOutcome,
+    PublicationEventStatus,
     PublicationEventType,
 )
 
@@ -189,6 +190,7 @@ class PolicyDecision(UUIDPrimaryKeyMixin, Base):
 
 class PublicationEvent(UUIDPrimaryKeyMixin, Base):
     __tablename__ = "publication_events"
+    __table_args__ = (UniqueConstraint("idempotency_key", name="uq_publication_events_idempotency_key"),)
 
     cve_id: Mapped[UUID] = mapped_column(ForeignKey("cves.id", ondelete="CASCADE"), nullable=False)
     decision_id: Mapped[UUID | None] = mapped_column(ForeignKey("policy_decisions.id", ondelete="SET NULL"))
@@ -196,8 +198,20 @@ class PublicationEvent(UUIDPrimaryKeyMixin, Base):
         Enum(PublicationEventType, name="publication_event_type"),
         nullable=False,
     )
+    status: Mapped[PublicationEventStatus] = mapped_column(
+        Enum(PublicationEventStatus, name="publication_event_status"),
+        default=PublicationEventStatus.PENDING,
+        nullable=False,
+    )
     destination: Mapped[str | None] = mapped_column(String(255))
+    idempotency_key: Mapped[str] = mapped_column(String(128), nullable=False, index=True)
     content_hash: Mapped[str | None] = mapped_column(String(128))
+    external_id: Mapped[str | None] = mapped_column(String(255))
+    target_response: Mapped[dict[str, Any]] = mapped_column(JSONB, default=dict, nullable=False)
+    attempt_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    last_attempted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    published_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    last_error: Mapped[str | None] = mapped_column(Text())
     payload_snapshot: Mapped[dict[str, Any]] = mapped_column(JSONB, default=dict, nullable=False)
     occurred_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)

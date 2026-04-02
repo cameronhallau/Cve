@@ -63,6 +63,12 @@ class PublicationEventType(StrEnum):
     SUPPRESS = "SUPPRESS"
 
 
+class PublicationEventStatus(StrEnum):
+    PENDING = "PENDING"
+    PUBLISHED = "PUBLISHED"
+    FAILED = "FAILED"
+
+
 class AuditActorType(StrEnum):
     SYSTEM = "SYSTEM"
     USER = "USER"
