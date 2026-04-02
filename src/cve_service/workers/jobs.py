@@ -182,7 +182,7 @@ def process_publication_job(
     cve_id: str,
     database_url: str | None = None,
     *,
-    publish_target_name: str = "console",
+    publish_target_name: str | None = None,
     publish_target_behavior: dict[str, Any] | None = None,
     attempted_at: str | datetime | None = None,
 ) -> dict[str, Any]:
@@ -197,6 +197,7 @@ def process_publication_job(
     try:
         with session_scope(session_factory) as session:
             target = build_publish_target(
+                settings=settings,
                 target_name=publish_target_name,
                 behavior=publish_target_behavior,
             )
@@ -219,9 +220,14 @@ def process_publication_job(
             "idempotency_key": result.idempotency_key,
             "published": result.published,
             "duplicate_blocked": result.duplicate_blocked,
+            "retry_blocked": result.retry_blocked,
             "reused_event": result.reused_event,
             "attempt_count": result.attempt_count,
             "external_id": result.external_id,
+            "failure_category": result.failure_category,
+            "retryable": result.retryable,
+            "requires_reconciliation": result.requires_reconciliation,
+            "rate_limited": result.rate_limited,
         }
     finally:
         engine.dispose()

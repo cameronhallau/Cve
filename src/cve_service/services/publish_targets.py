@@ -4,11 +4,52 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Any, Protocol
 
+from cve_service.core.config import Settings, get_settings
 from cve_service.services.publish_content import PublishContent
 
 
 class PublishTargetError(RuntimeError):
     """Raised when an external publish target rejects or fails a request."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        category: str = "permanent_failure",
+        retryable: bool = False,
+        requires_reconciliation: bool = False,
+        retry_blocked: bool = False,
+        rate_limited: bool = False,
+        retry_after_seconds: int | None = None,
+        status_code: int | None = None,
+        external_id: str | None = None,
+        response_payload: dict[str, Any] | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.category = category
+        self.retryable = retryable
+        self.requires_reconciliation = requires_reconciliation
+        self.retry_blocked = retry_blocked
+        self.rate_limited = rate_limited
+        self.retry_after_seconds = retry_after_seconds
+        self.status_code = status_code
+        self.external_id = external_id
+        self.response_payload = dict(response_payload or {})
+
+    def as_payload(self, *, target_name: str) -> dict[str, Any]:
+        return {
+            "target": target_name,
+            "error": str(self),
+            "failure_category": self.category,
+            "retryable": self.retryable,
+            "requires_reconciliation": self.requires_reconciliation,
+            "retry_blocked": self.retry_blocked,
+            "rate_limited": self.rate_limited,
+            "retry_after_seconds": self.retry_after_seconds,
+            "status_code": self.status_code,
+            "external_id": self.external_id,
+            **self.response_payload,
+        }
 
 
 @dataclass(frozen=True, slots=True)
@@ -102,10 +143,12 @@ class ConsolePublishTarget:
 
 def build_publish_target(
     *,
+    settings: Settings | None = None,
     target_name: str | None = None,
     behavior: dict[str, Any] | None = None,
 ) -> PublishTarget:
-    resolved_name = target_name or "console"
+    app_settings = settings or get_settings()
+    resolved_name = (target_name or app_settings.publish_target_name or "console").strip().lower()
     resolved_behavior = behavior or {}
     if resolved_name == "inline":
         return InlinePublishTarget(
@@ -114,4 +157,8 @@ def build_publish_target(
             external_id=resolved_behavior.get("external_id"),
             response_payload=dict(resolved_behavior.get("response_payload", {})),
         )
+    if resolved_name == "x":
+        from cve_service.services.x_publish import XPublishTarget
+
+        return XPublishTarget.from_settings(app_settings)
     return ConsolePublishTarget(name=resolved_behavior.get("name", resolved_name))

@@ -1,8 +1,9 @@
 from __future__ import annotations
 
 from functools import lru_cache
+from typing import Literal
 
-from pydantic import AliasChoices, Field
+from pydantic import AliasChoices, Field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -25,6 +26,15 @@ class Settings(BaseSettings):
     )
     openrouter_http_referer: str | None = None
     openrouter_title: str | None = None
+    publish_target_name: str = "console"
+    x_api_base_url: str = "https://api.x.com"
+    x_timeout_seconds: float = Field(default=15.0, gt=0)
+    x_auth_mode: Literal["oauth1_user", "oauth2_bearer"] | None = None
+    x_consumer_key: str | None = None
+    x_consumer_secret: str | None = None
+    x_access_token: str | None = None
+    x_access_token_secret: str | None = None
+    x_bearer_token: str | None = None
 
     model_config = SettingsConfigDict(
         env_prefix="CVE_",
@@ -33,6 +43,37 @@ class Settings(BaseSettings):
         case_sensitive=False,
         extra="ignore",
     )
+
+    @model_validator(mode="after")
+    def validate_publish_target_settings(self) -> Settings:
+        if self.publish_target_name.strip().lower() != "x":
+            return self
+
+        if self.x_auth_mode is None:
+            raise ValueError("CVE publish target 'x' requires CVE_X_AUTH_MODE")
+
+        if self.x_auth_mode == "oauth1_user":
+            missing = [
+                field_name
+                for field_name, value in (
+                    ("CVE_X_CONSUMER_KEY", self.x_consumer_key),
+                    ("CVE_X_CONSUMER_SECRET", self.x_consumer_secret),
+                    ("CVE_X_ACCESS_TOKEN", self.x_access_token),
+                    ("CVE_X_ACCESS_TOKEN_SECRET", self.x_access_token_secret),
+                )
+                if not value
+            ]
+            if missing:
+                raise ValueError(
+                    "CVE publish target 'x' with oauth1_user auth requires "
+                    + ", ".join(missing)
+                )
+            return self
+
+        if self.x_auth_mode == "oauth2_bearer" and not self.x_bearer_token:
+            raise ValueError("CVE publish target 'x' with oauth2_bearer auth requires CVE_X_BEARER_TOKEN")
+
+        return self
 
 
 @lru_cache(maxsize=1)
