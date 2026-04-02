@@ -12,6 +12,7 @@ from cve_service.models.entities import AuditEvent, CVE, Classification, Evidenc
 from cve_service.models.enums import AuditActorType, CveState, PublicationEventStatus
 from cve_service.services.ai_review import fingerprint_payload
 from cve_service.services.enrichment import SignalEvidenceRecord, summarize_signal_evidence
+from cve_service.services.operational_metrics import increment_operational_metric
 from cve_service.services.reason_codes import reason_code_registry_snapshot, validate_reason_codes
 from cve_service.services.state_machine import InvalidStateTransition, guard_transition
 
@@ -19,6 +20,7 @@ if TYPE_CHECKING:
     from cve_service.services.publish_queue import PublishJobProducer
 
 MATERIAL_CHANGE_COMPARATOR_VERSION = "phase5-material-change-comparator.v1"
+UPDATE_CANDIDATE_METRIC_KEY = "phase5.update_candidate.evaluations.total"
 NON_MATERIAL_METADATA_FIELDS: tuple[str, ...] = (
     "cve.title",
     "cve.description",
@@ -171,6 +173,20 @@ def detect_update_candidate(
 ) -> UpdateCandidateDetectionResult:
     cve = _get_cve_by_public_id(session, cve_id)
     if cve.state not in {CveState.PUBLISHED, CveState.UPDATE_PENDING}:
+        increment_operational_metric(
+            session,
+            UPDATE_CANDIDATE_METRIC_KEY,
+            dimensions={
+                "result": "skipped",
+                "reason": "state_ineligible",
+                "trigger": trigger,
+            },
+            observed_at=evaluated_at,
+            details={
+                "cve_id": cve.cve_id,
+                "state": cve.state.value,
+            },
+        )
         return UpdateCandidateDetectionResult(
             cve_id=cve.cve_id,
             evaluated=False,
@@ -186,6 +202,20 @@ def detect_update_candidate(
 
     baseline_publication = _get_latest_successful_publication_event(session, cve.id)
     if baseline_publication is None:
+        increment_operational_metric(
+            session,
+            UPDATE_CANDIDATE_METRIC_KEY,
+            dimensions={
+                "result": "skipped",
+                "reason": "missing_baseline_publication",
+                "trigger": trigger,
+            },
+            observed_at=evaluated_at,
+            details={
+                "cve_id": cve.cve_id,
+                "state": cve.state.value,
+            },
+        )
         return UpdateCandidateDetectionResult(
             cve_id=cve.cve_id,
             evaluated=False,
@@ -228,6 +258,21 @@ def detect_update_candidate(
                 "material_change_detected": False,
                 "material_change_codes": [],
                 "non_material_changes": comparison.comparison_snapshot["changes"]["non_material"],
+            },
+        )
+        increment_operational_metric(
+            session,
+            UPDATE_CANDIDATE_METRIC_KEY,
+            dimensions={
+                "result": "not_created",
+                "trigger": trigger,
+            },
+            observed_at=effective_evaluated_at,
+            details={
+                "cve_id": cve.cve_id,
+                "comparison_fingerprint": comparison.comparison_fingerprint,
+                "baseline_publication_event_id": baseline_publication.id,
+                "material_change_detected": False,
             },
         )
         session.flush()
@@ -274,6 +319,22 @@ def detect_update_candidate(
             publish_producer=publish_producer,
             requested_at=effective_evaluated_at,
             actor_type=actor_type,
+        )
+        increment_operational_metric(
+            session,
+            UPDATE_CANDIDATE_METRIC_KEY,
+            dimensions={
+                "result": "reused",
+                "trigger": trigger,
+            },
+            observed_at=effective_evaluated_at,
+            details={
+                "cve_id": cve.cve_id,
+                "update_candidate_id": existing_candidate.id,
+                "comparison_fingerprint": comparison.comparison_fingerprint,
+                "baseline_publication_event_id": baseline_publication.id,
+                "publication_job_id": publication_job_id,
+            },
         )
         session.flush()
         return UpdateCandidateDetectionResult(
@@ -326,6 +387,22 @@ def detect_update_candidate(
         publish_producer=publish_producer,
         requested_at=effective_evaluated_at,
         actor_type=actor_type,
+    )
+    increment_operational_metric(
+        session,
+        UPDATE_CANDIDATE_METRIC_KEY,
+        dimensions={
+            "result": "created",
+            "trigger": trigger,
+        },
+        observed_at=effective_evaluated_at,
+        details={
+            "cve_id": cve.cve_id,
+            "update_candidate_id": candidate.id,
+            "comparison_fingerprint": comparison.comparison_fingerprint,
+            "baseline_publication_event_id": baseline_publication.id,
+            "publication_job_id": publication_job_id,
+        },
     )
     session.flush()
     return UpdateCandidateDetectionResult(

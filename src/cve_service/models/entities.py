@@ -294,6 +294,25 @@ class UpdateCandidate(UUIDPrimaryKeyMixin, Base):
     )
 
 
+class OperationalMetric(UUIDPrimaryKeyMixin, TimestampMixin, Base):
+    __tablename__ = "operational_metrics"
+    __table_args__ = (
+        UniqueConstraint(
+            "metric_key",
+            "dimension_key",
+            name="uq_operational_metrics_metric_dimension",
+        ),
+    )
+
+    metric_key: Mapped[str] = mapped_column(String(128), nullable=False, index=True)
+    dimension_key: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    dimensions: Mapped[dict[str, Any]] = mapped_column(JSONB, default=dict, nullable=False)
+    total_count: Mapped[int] = mapped_column(Integer(), default=0, nullable=False)
+    first_observed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    last_observed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    last_details: Mapped[dict[str, Any]] = mapped_column(JSONB, default=dict, nullable=False)
+
+
 class AuditEvent(UUIDPrimaryKeyMixin, Base):
     __tablename__ = "audit_events"
 

@@ -11,11 +11,13 @@ from sqlalchemy.orm import Session
 
 from cve_service.core.db import register_after_commit_callback
 from cve_service.models.entities import AuditEvent, CVE, PolicyDecision
-from cve_service.models.enums import AuditActorType, CveState, PolicyDecisionOutcome
+from cve_service.models.enums import AuditActorType, CveState, PolicyDecisionOutcome, PublicationEventType
+from cve_service.services.operational_metrics import increment_operational_metric
 from cve_service.services.publication import prepare_publication
 
 PUBLISH_JOB_PATH = "cve_service.workers.jobs.process_publication_job"
 ELIGIBLE_STATES = {CveState.PUBLISH_PENDING, CveState.UPDATE_PENDING}
+UPDATE_ENQUEUE_METRIC_KEY = "phase5.update_enqueue.attempts.total"
 
 
 class PublishJobProducer(Protocol):
@@ -62,6 +64,15 @@ class RQPublishJobProducer:
                     "skip_reason": "no_publishable_policy_decision",
                 },
             )
+            _record_update_enqueue_metric(
+                session,
+                cve=cve,
+                result="skipped",
+                trigger=trigger,
+                target_name=self.publish_target_name,
+                observed_at=requested_at,
+                details={"skip_reason": "no_publishable_policy_decision"},
+            )
             return None
 
         if cve.state not in ELIGIBLE_STATES:
@@ -76,6 +87,15 @@ class RQPublishJobProducer:
                     "target_name": self.publish_target_name,
                     "skip_reason": f"state_ineligible:{cve.state.value}",
                 },
+            )
+            _record_update_enqueue_metric(
+                session,
+                cve=cve,
+                result="skipped",
+                trigger=trigger,
+                target_name=self.publish_target_name,
+                observed_at=requested_at,
+                details={"skip_reason": f"state_ineligible:{cve.state.value}"},
             )
             return None
 
@@ -109,6 +129,21 @@ class RQPublishJobProducer:
                     else None
                 ),
                 "requested_at": _serialize_datetime(requested_at),
+            },
+        )
+        _record_update_enqueue_metric(
+            session,
+            cve=cve,
+            result="reused" if existing_job is not None else "requested",
+            trigger=trigger,
+            target_name=prepared.target_name,
+            publication_event_type=prepared.event_type,
+            observed_at=requested_at,
+            details={
+                "job_id": job_id,
+                "idempotency_key": prepared.idempotency_key,
+                "content_hash": prepared.content_hash,
+                "triggering_update_candidate_id": prepared.update_candidate.id if prepared.update_candidate is not None else None,
             },
         )
 
@@ -201,3 +236,36 @@ def _serialize_datetime(value: datetime | None) -> str | None:
     else:
         value = value.astimezone(UTC)
     return value.isoformat()
+
+
+def _record_update_enqueue_metric(
+    session: Session,
+    *,
+    cve: CVE,
+    result: str,
+    trigger: str,
+    target_name: str,
+    publication_event_type: PublicationEventType | None = None,
+    observed_at: datetime | None,
+    details: dict[str, Any],
+) -> None:
+    effective_event_type = publication_event_type
+    if effective_event_type is None and cve.state in {CveState.PUBLISHED, CveState.UPDATE_PENDING}:
+        effective_event_type = PublicationEventType.UPDATE
+    if effective_event_type is not PublicationEventType.UPDATE:
+        return
+    increment_operational_metric(
+        session,
+        UPDATE_ENQUEUE_METRIC_KEY,
+        dimensions={
+            "publication_event_type": effective_event_type.value,
+            "result": result,
+            "target_name": target_name,
+            "trigger": trigger,
+        },
+        observed_at=observed_at,
+        details={
+            "cve_id": cve.cve_id,
+            **details,
+        },
+    )

@@ -9,11 +9,13 @@ from sqlalchemy.orm import Session
 
 from cve_service.models.entities import AuditEvent, CVE, Evidence
 from cve_service.models.enums import AuditActorType, CveState, EvidenceSignal, EvidenceSourceType, EvidenceStatus
+from cve_service.services.operational_metrics import increment_operational_metric
 from cve_service.services.post_enrichment_queue import PostEnrichmentJobProducer
 from cve_service.services.publish_queue import PublishJobProducer
 
 LOW_CONFIDENCE_THRESHOLD = 0.6
 DEFAULT_FRESHNESS_TTL_SECONDS = 30 * 24 * 60 * 60
+STALE_REFRESH_METRIC_KEY = "phase5.stale_evidence.refresh.total"
 
 
 @dataclass(frozen=True, slots=True)
@@ -410,6 +412,26 @@ def refresh_stale_evidence(
                 "selected_source_name": target.selected_source_name,
                 "selected_source_record_id": target.selected_source_record_id,
                 "action": "reevaluate_summary",
+            },
+        )
+        increment_operational_metric(
+            session,
+            STALE_REFRESH_METRIC_KEY,
+            dimensions={
+                "action": "reevaluate_summary",
+                "signal_type": target.signal_type.value,
+                "trigger": trigger,
+            },
+            observed_at=target.evaluated_at,
+            details={
+                "cve_id": target.cve_id,
+                "considered_records": target.considered_records,
+                "fresh_records": target.fresh_records,
+                "qualified_records": target.qualified_records,
+                "stale_records": target.stale_records,
+                "selected_source_type": target.selected_source_type,
+                "selected_source_name": target.selected_source_name,
+                "selected_source_record_id": target.selected_source_record_id,
             },
         )
         if target.cve_id not in recompute_cve_ids:

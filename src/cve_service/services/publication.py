@@ -26,6 +26,7 @@ from cve_service.models.enums import (
     PublicationEventType,
 )
 from cve_service.services.ai_review import fingerprint_payload
+from cve_service.services.operational_metrics import increment_operational_metric
 from cve_service.services.publish_content import (
     PublishContent,
     build_initial_publish_content,
@@ -36,6 +37,7 @@ from cve_service.services.state_machine import InvalidStateTransition, guard_tra
 
 PUBLICATION_EVENT_SCHEMA_VERSION = "phase4-publication-event.v1"
 UPDATE_PUBLICATION_EVENT_SCHEMA_VERSION = "phase5-update-publication-event.v1"
+UPDATE_PUBLICATION_METRIC_KEY = "phase5.update_publication.outcomes.total"
 
 
 @dataclass(frozen=True, slots=True)
@@ -308,6 +310,17 @@ def _publish_prepared(
                 },
             ),
         )
+        _record_update_publication_metric(
+            session,
+            prepared=prepared,
+            result="duplicate_blocked",
+            observed_at=effective_attempted_at,
+            details={
+                "cve_id": prepared.cve.cve_id,
+                "publication_event_id": successful_duplicate.id,
+                "existing_event_id": successful_duplicate.id,
+            },
+        )
         session.flush()
         return PublicationResult(
             cve_id=prepared.cve.cve_id,
@@ -400,6 +413,18 @@ def _publish_prepared(
                 },
             ),
         )
+        _record_update_publication_metric(
+            session,
+            prepared=prepared,
+            result="failed",
+            observed_at=effective_attempted_at,
+            details={
+                "cve_id": prepared.cve.cve_id,
+                "publication_event_id": event.id,
+                "attempt_count": event.attempt_count,
+                "error": str(exc),
+            },
+        )
         session.flush()
         return PublicationResult(
             cve_id=prepared.cve.cve_id,
@@ -455,6 +480,18 @@ def _publish_prepared(
                 "reused_event": reused_event,
             },
         ),
+    )
+    _record_update_publication_metric(
+        session,
+        prepared=prepared,
+        result="succeeded",
+        observed_at=event.published_at,
+        details={
+            "cve_id": prepared.cve.cve_id,
+            "publication_event_id": event.id,
+            "attempt_count": event.attempt_count,
+            "external_id": event.external_id,
+        },
     )
     session.flush()
     return PublicationResult(
@@ -827,4 +864,34 @@ def _write_audit_event(
             state_after=state_after,
             details=details,
         )
+    )
+
+
+def _record_update_publication_metric(
+    session: Session,
+    *,
+    prepared: PreparedPublication,
+    result: str,
+    observed_at: datetime | None,
+    details: dict[str, Any],
+) -> None:
+    if prepared.event_type is not PublicationEventType.UPDATE:
+        return
+    increment_operational_metric(
+        session,
+        UPDATE_PUBLICATION_METRIC_KEY,
+        dimensions={
+            "event_type": prepared.event_type.value,
+            "result": result,
+            "target_name": prepared.target_name,
+        },
+        observed_at=observed_at,
+        details={
+            "idempotency_key": prepared.idempotency_key,
+            "triggering_update_candidate_id": prepared.update_candidate.id if prepared.update_candidate is not None else None,
+            "baseline_publication_event_id": (
+                prepared.baseline_publication_event.id if prepared.baseline_publication_event is not None else None
+            ),
+            **details,
+        },
     )
