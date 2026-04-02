@@ -5,7 +5,7 @@ from datetime import UTC, datetime
 from sqlalchemy import select
 
 from cve_service.core.db import session_scope
-from cve_service.models.entities import AuditEvent, CVE, PublicationEvent
+from cve_service.models.entities import AuditEvent, CVE, PolicyDecision, PublicationEvent
 from cve_service.models.enums import CveState, EvidenceSignal, EvidenceStatus, PublicationEventStatus
 from cve_service.services.enrichment import EvidenceInput, record_evidence
 from cve_service.services.ingestion import PublicFeedRecord, ingest_public_feed_record
@@ -32,6 +32,7 @@ def test_publish_service_moves_publish_pending_candidate_to_published_with_repla
         )
         cve = session.scalar(select(CVE).where(CVE.cve_id == "CVE-2026-0800"))
         event = session.scalar(select(PublicationEvent))
+        decision = session.scalar(select(PolicyDecision))
         audit_events = session.scalars(
             select(AuditEvent)
             .where(AuditEvent.event_type.in_(("publication.succeeded",)))
@@ -45,11 +46,16 @@ def test_publish_service_moves_publish_pending_candidate_to_published_with_repla
     assert cve is not None
     assert cve.state is CveState.PUBLISHED
     assert event is not None
+    assert decision is not None
     assert event.destination == "test-memory"
     assert event.status is PublicationEventStatus.PUBLISHED
+    assert event.policy_snapshot_id == decision.policy_snapshot_id
     assert event.payload_snapshot["schema_version"] == "phase4-publication-event.v1"
     assert event.payload_snapshot["publish_content"]["title"] == "CVE-2026-0800: Exchange Server RCE"
     assert event.payload_snapshot["replay_context"]["policy_decision"]["decision"] == "PUBLISH"
+    assert event.payload_snapshot["replay_context"]["policy_decision"]["policy_snapshot_id"] == str(decision.policy_snapshot_id)
+    assert event.payload_snapshot["replay_context"]["policy_configuration"]["id"] == str(decision.policy_snapshot_id)
+    assert event.payload_snapshot["replay_context"]["policy_configuration"]["snapshot"]["policy_version"] == decision.policy_version
     assert event.payload_snapshot["attempts"][0]["outcome"] == "PUBLISHED"
     assert len(target.published_requests) == 1
     assert len(audit_events) == 1

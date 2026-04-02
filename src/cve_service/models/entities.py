@@ -166,11 +166,27 @@ class AIReview(UUIDPrimaryKeyMixin, Base):
     cve: Mapped[CVE] = relationship(back_populates="ai_reviews")
 
 
+class PolicyConfigurationSnapshot(UUIDPrimaryKeyMixin, Base):
+    __tablename__ = "policy_configuration_snapshots"
+    __table_args__ = (UniqueConstraint("config_fingerprint", name="uq_policy_configuration_snapshots_config_fingerprint"),)
+
+    policy_version: Mapped[str] = mapped_column(String(64), nullable=False)
+    config_fingerprint: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    config_snapshot: Mapped[dict[str, Any]] = mapped_column(JSONB, default=dict, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+
+    policy_decisions: Mapped[list["PolicyDecision"]] = relationship(back_populates="policy_snapshot")
+    publication_events: Mapped[list["PublicationEvent"]] = relationship(back_populates="policy_snapshot")
+
+
 class PolicyDecision(UUIDPrimaryKeyMixin, Base):
     __tablename__ = "policy_decisions"
 
     cve_id: Mapped[UUID] = mapped_column(ForeignKey("cves.id", ondelete="CASCADE"), nullable=False)
     ai_review_id: Mapped[UUID | None] = mapped_column(ForeignKey("ai_reviews.id", ondelete="SET NULL"))
+    policy_snapshot_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("policy_configuration_snapshots.id", ondelete="SET NULL")
+    )
     policy_version: Mapped[str] = mapped_column(String(64), nullable=False)
     input_fingerprint: Mapped[str] = mapped_column(String(64), nullable=False)
     decision: Mapped[PolicyDecisionOutcome] = mapped_column(
@@ -182,10 +198,13 @@ class PolicyDecision(UUIDPrimaryKeyMixin, Base):
     )
     reason_codes: Mapped[list[str]] = mapped_column(JSONB, default=list, nullable=False)
     inputs_snapshot: Mapped[dict[str, Any]] = mapped_column(JSONB, default=dict, nullable=False)
+    rationale: Mapped[dict[str, Any]] = mapped_column(JSONB, default=dict, nullable=False)
+    conflict_resolution: Mapped[dict[str, Any]] = mapped_column(JSONB, default=dict, nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
 
     cve: Mapped[CVE] = relationship(back_populates="policy_decisions")
     ai_review: Mapped[AIReview | None] = relationship()
+    policy_snapshot: Mapped[PolicyConfigurationSnapshot | None] = relationship(back_populates="policy_decisions")
 
 
 class PublicationEvent(UUIDPrimaryKeyMixin, Base):
@@ -194,6 +213,9 @@ class PublicationEvent(UUIDPrimaryKeyMixin, Base):
 
     cve_id: Mapped[UUID] = mapped_column(ForeignKey("cves.id", ondelete="CASCADE"), nullable=False)
     decision_id: Mapped[UUID | None] = mapped_column(ForeignKey("policy_decisions.id", ondelete="SET NULL"))
+    policy_snapshot_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("policy_configuration_snapshots.id", ondelete="SET NULL")
+    )
     event_type: Mapped[PublicationEventType] = mapped_column(
         Enum(PublicationEventType, name="publication_event_type"),
         nullable=False,
@@ -218,6 +240,7 @@ class PublicationEvent(UUIDPrimaryKeyMixin, Base):
 
     cve: Mapped[CVE] = relationship(back_populates="publication_events")
     decision: Mapped[PolicyDecision | None] = relationship()
+    policy_snapshot: Mapped[PolicyConfigurationSnapshot | None] = relationship(back_populates="publication_events")
 
 
 class AuditEvent(UUIDPrimaryKeyMixin, Base):

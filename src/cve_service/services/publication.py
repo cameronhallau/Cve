@@ -8,7 +8,15 @@ from uuid import UUID
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from cve_service.models.entities import AIReview, AuditEvent, CVE, Classification, PolicyDecision, PublicationEvent
+from cve_service.models.entities import (
+    AIReview,
+    AuditEvent,
+    CVE,
+    Classification,
+    PolicyConfigurationSnapshot,
+    PolicyDecision,
+    PublicationEvent,
+)
 from cve_service.models.enums import (
     AuditActorType,
     CveState,
@@ -29,6 +37,7 @@ class PreparedInitialPublication:
     cve: CVE
     classification: Classification
     decision: PolicyDecision
+    policy_snapshot: PolicyConfigurationSnapshot | None
     ai_review: AIReview | None
     target_name: str
     content: PublishContent
@@ -74,6 +83,7 @@ def prepare_initial_publication(
         raise ValueError(f"cve is not in a publishable state for {cve_id}: {cve.state.value}")
 
     ai_review = _get_latest_ai_review(session, cve.id)
+    policy_snapshot = decision.policy_snapshot
     content = build_initial_publish_content(
         cve=cve,
         classification=classification,
@@ -93,6 +103,7 @@ def prepare_initial_publication(
         cve=cve,
         classification=classification,
         decision=decision,
+        policy_snapshot=policy_snapshot,
         ai_review=ai_review,
         target_name=target_name,
         content=content,
@@ -100,13 +111,14 @@ def prepare_initial_publication(
         idempotency_key=idempotency_key,
         payload_snapshot=_build_publication_payload_snapshot(
             cve=cve,
-            classification=classification,
-            decision=decision,
-            ai_review=ai_review,
-            target_name=target_name,
-            content=content,
-            content_hash=content_hash,
-            idempotency_key=idempotency_key,
+        classification=classification,
+        decision=decision,
+        policy_snapshot=policy_snapshot,
+        ai_review=ai_review,
+        target_name=target_name,
+        content=content,
+        content_hash=content_hash,
+        idempotency_key=idempotency_key,
         ),
     )
 
@@ -172,6 +184,7 @@ def publish_initial_publication(
         event = PublicationEvent(
             cve_id=prepared.cve.id,
             decision_id=prepared.decision.id,
+            policy_snapshot_id=prepared.policy_snapshot.id if prepared.policy_snapshot is not None else None,
             event_type=PublicationEventType.INITIAL,
             status=PublicationEventStatus.PENDING,
             destination=prepared.target_name,
@@ -313,6 +326,7 @@ def _build_publication_payload_snapshot(
     cve: CVE,
     classification: Classification,
     decision: PolicyDecision,
+    policy_snapshot: PolicyConfigurationSnapshot | None,
     ai_review: AIReview | None,
     target_name: str,
     content: PublishContent,
@@ -346,6 +360,7 @@ def _build_publication_payload_snapshot(
             },
             "policy_decision": {
                 "id": str(decision.id),
+                "policy_snapshot_id": str(decision.policy_snapshot_id) if decision.policy_snapshot_id is not None else None,
                 "policy_version": decision.policy_version,
                 "decision": decision.decision.value,
                 "deterministic_outcome": decision.deterministic_outcome.value
@@ -354,6 +369,14 @@ def _build_publication_payload_snapshot(
                 "reason_codes": list(decision.reason_codes),
                 "input_fingerprint": decision.input_fingerprint,
                 "inputs_snapshot": decision.inputs_snapshot,
+                "rationale": decision.rationale,
+                "conflict_resolution": decision.conflict_resolution,
+            },
+            "policy_configuration": {
+                "id": str(policy_snapshot.id) if policy_snapshot is not None else None,
+                "policy_version": policy_snapshot.policy_version if policy_snapshot is not None else decision.policy_version,
+                "config_fingerprint": policy_snapshot.config_fingerprint if policy_snapshot is not None else None,
+                "snapshot": policy_snapshot.config_snapshot if policy_snapshot is not None else None,
             },
             "ai_review": _serialize_ai_review(ai_review),
         },

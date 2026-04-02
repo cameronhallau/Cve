@@ -10,6 +10,7 @@ EXPECTED_TABLES = {
     "cve_ingestion_snapshots",
     "cves",
     "evidence",
+    "policy_configuration_snapshots",
     "policy_decisions",
     "products",
     "publication_events",
