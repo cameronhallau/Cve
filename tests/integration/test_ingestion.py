@@ -74,6 +74,7 @@ def test_consumer_only_products_are_denied_and_persist_classifier_trace(session_
     assert stored.classifier_version == "deterministic-classifier.v1"
     assert stored.reason_codes == ["classifier.deny.consumer_only_product"]
     assert stored.details["reason_code_registry_version"] == "reason-codes.v1"
+    assert stored.details["product_registry_version"] == "product-registry.v1"
     assert stored.snapshot_id is not None
     assert stored.details["canonical_name"] == "tp-link:archer-ax50"
     assert cve is not None
@@ -128,6 +129,7 @@ def test_alias_only_rename_reingest_keeps_same_canonical_identity_without_classi
     assert classifications[0].details["canonical_name"] == "microsoft:exchange-server"
     assert classifications[0].details["canonical_vendor_name"] == "Microsoft"
     assert classifications[0].details["canonical_product_name"] == "Exchange Server"
+    assert classifications[0].details["product_registry_version"] == "product-registry.v1"
     assert sorted(event.event_type for event in audit_events) == [
         "classification.persisted",
         "classification.skipped_non_material_churn",
