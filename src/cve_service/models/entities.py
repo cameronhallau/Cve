@@ -15,6 +15,7 @@ from cve_service.models.enums import (
     ClassificationOutcome,
     CveState,
     EvidenceSignal,
+    EvidenceSourceType,
     EvidenceStatus,
     PolicyDecisionOutcome,
     PublicationEventType,
@@ -117,16 +118,25 @@ class Evidence(UUIDPrimaryKeyMixin, Base):
     cve_id: Mapped[UUID] = mapped_column(ForeignKey("cves.id", ondelete="CASCADE"), nullable=False)
     product_id: Mapped[UUID | None] = mapped_column(ForeignKey("products.id", ondelete="SET NULL"))
     signal_type: Mapped[EvidenceSignal] = mapped_column(Enum(EvidenceSignal, name="evidence_signal"), nullable=False)
+    source_type: Mapped[EvidenceSourceType] = mapped_column(
+        Enum(EvidenceSourceType, name="evidence_source_type"),
+        default=EvidenceSourceType.OTHER,
+        nullable=False,
+    )
     status: Mapped[EvidenceStatus] = mapped_column(
         Enum(EvidenceStatus, name="evidence_status"),
         default=EvidenceStatus.UNKNOWN,
         nullable=False,
     )
     source_name: Mapped[str] = mapped_column(String(255), nullable=False)
+    source_record_id: Mapped[str] = mapped_column(String(255), nullable=False)
     source_url: Mapped[str | None] = mapped_column(String(1024))
     evidence_timestamp: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    collected_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    freshness_ttl_seconds: Mapped[int] = mapped_column(Integer(), nullable=False)
     confidence: Mapped[float | None] = mapped_column(Float())
     is_authoritative: Mapped[bool] = mapped_column(Boolean(), default=False, nullable=False)
+    confidence_inputs: Mapped[dict[str, Any]] = mapped_column(JSONB, default=dict, nullable=False)
     raw_payload: Mapped[dict[str, Any]] = mapped_column(JSONB, default=dict, nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
 

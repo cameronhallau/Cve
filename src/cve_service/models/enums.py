@@ -22,6 +22,14 @@ class EvidenceSignal(StrEnum):
     OTHER = "OTHER"
 
 
+class EvidenceSourceType(StrEnum):
+    OTHER = "OTHER"
+    VENDOR_ADVISORY = "VENDOR_ADVISORY"
+    TRUSTED_POC = "TRUSTED_POC"
+    TRUSTED_ITW = "TRUSTED_ITW"
+    KEV = "KEV"
+
+
 class EvidenceStatus(StrEnum):
     UNKNOWN = "UNKNOWN"
     ABSENT = "ABSENT"
@@ -59,4 +67,3 @@ class AuditActorType(StrEnum):
     USER = "USER"
     WORKER = "WORKER"
     AI = "AI"
-
