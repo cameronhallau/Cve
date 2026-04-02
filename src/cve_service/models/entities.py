@@ -313,6 +313,22 @@ class OperationalMetric(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     last_details: Mapped[dict[str, Any]] = mapped_column(JSONB, default=dict, nullable=False)
 
 
+class SourceProgress(UUIDPrimaryKeyMixin, TimestampMixin, Base):
+    __tablename__ = "source_progress"
+    __table_args__ = (UniqueConstraint("source_name", name="uq_source_progress_source_name"),)
+
+    source_name: Mapped[str] = mapped_column(String(128), nullable=False, index=True)
+    cursor: Mapped[dict[str, Any]] = mapped_column(JSONB, default=dict, nullable=False)
+    last_poll_started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    last_poll_completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    last_successful_poll_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    last_seen_upstream_fetch_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    last_run_status: Mapped[str | None] = mapped_column(String(32))
+    consecutive_failures: Mapped[int] = mapped_column(Integer(), default=0, nullable=False)
+    last_error: Mapped[dict[str, Any]] = mapped_column(JSONB, default=dict, nullable=False)
+    last_run_details: Mapped[dict[str, Any]] = mapped_column(JSONB, default=dict, nullable=False)
+
+
 class OperationalAlertState(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     __tablename__ = "operational_alert_states"
     __table_args__ = (UniqueConstraint("alert_key", name="uq_operational_alert_states_alert_key"),)

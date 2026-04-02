@@ -27,6 +27,8 @@ class Settings(BaseSettings):
     openrouter_http_referer: str | None = None
     openrouter_title: str | None = None
     publish_target_name: str = "console"
+    cve_org_delta_log_url: str = "https://raw.githubusercontent.com/CVEProject/cvelistV5/main/cves/deltaLog.json"
+    cve_org_http_timeout_seconds: float = Field(default=20.0, gt=0)
     x_api_base_url: str = "https://api.x.com"
     x_timeout_seconds: float = Field(default=15.0, gt=0)
     x_auth_mode: Literal["oauth1_user", "oauth2_bearer"] | None = None
@@ -46,6 +48,9 @@ class Settings(BaseSettings):
 
     @model_validator(mode="after")
     def validate_publish_target_settings(self) -> Settings:
+        if not self.cve_org_delta_log_url.strip():
+            raise ValueError("CVE_CVE_ORG_DELTA_LOG_URL must not be empty")
+
         if self.publish_target_name.strip().lower() != "x":
             return self
 

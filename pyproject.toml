@@ -30,6 +30,10 @@ dev = [
 
 [project.scripts]
 cve-api = "cve_service.main:run"
+cve-alert-eval-once = "cve_service.runtime:run_alert_evaluation_once"
+cve-ingest-poll-once = "cve_service.runtime:run_ingest_poll_once"
+cve-runtime = "cve_service.runtime:run_runtime"
+cve-stale-refresh-once = "cve_service.runtime:run_stale_refresh_once"
 cve-worker = "cve_service.workers.worker:run_worker"
 
 [tool.setuptools]
