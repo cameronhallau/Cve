@@ -12,6 +12,7 @@ from cve_service.models.entities import AuditEvent, CVE
 from cve_service.models.enums import AuditActorType, CveState, PolicyDecisionOutcome
 from cve_service.services.ai_review import AIReviewExecutionResult, AIReviewProvider, execute_ai_review
 from cve_service.services.policy import PolicyGateResult, apply_policy_gate
+from cve_service.services.publish_queue import PublishJobProducer
 from cve_service.services.state_machine import InvalidStateTransition, guard_transition
 
 
@@ -21,6 +22,7 @@ class PostEnrichmentWorkflowResult:
     state: CveState
     ai_review_id: UUID | None
     policy_decision_id: UUID | None
+    publication_job_id: str | None
     ai_review_attempted: bool
     ai_review_skipped: bool
     ai_review_reused: bool
@@ -38,6 +40,7 @@ def process_post_enrichment_workflow(
     requested_at: datetime | None = None,
     evaluated_at: datetime | None = None,
     retry_ai_review: bool = False,
+    publish_producer: PublishJobProducer | None = None,
     actor_type: AuditActorType = AuditActorType.WORKER,
 ) -> PostEnrichmentWorkflowResult:
     cve = _get_cve_by_public_id(session, cve_id)
@@ -68,6 +71,7 @@ def process_post_enrichment_workflow(
         retry_override=retry_ai_review,
     )
     policy_result: PolicyGateResult | None = None
+    publication_job_id: str | None = None
 
     if ai_result.review_id is not None and ai_result.schema_valid is False:
         deferred_reason_codes = ("policy.defer.ai_invalid_review",)
@@ -90,6 +94,7 @@ def process_post_enrichment_workflow(
             actor_type=actor_type,
             ai_result=ai_result,
             policy_result=None,
+            publication_job_id=None,
             deferred_reason_codes=deferred_reason_codes,
         )
 
@@ -108,6 +113,14 @@ def process_post_enrichment_workflow(
                     "reused": policy_result.reused,
                 },
             )
+        elif policy_result.decision is PolicyDecisionOutcome.PUBLISH and publish_producer is not None:
+            publication_job_id = publish_producer.schedule(
+                session,
+                cve.cve_id,
+                trigger="policy_publish_handoff",
+                requested_at=_normalize_datetime(evaluated_at),
+                actor_type=actor_type,
+            )
 
     session.flush()
     return _finalize_result(
@@ -116,6 +129,7 @@ def process_post_enrichment_workflow(
         actor_type=actor_type,
         ai_result=ai_result,
         policy_result=policy_result,
+        publication_job_id=publication_job_id,
         deferred_reason_codes=policy_result.reason_codes if policy_result is not None and policy_result.decision is PolicyDecisionOutcome.DEFER else (),
     )
 
@@ -127,6 +141,7 @@ def _finalize_result(
     actor_type: AuditActorType,
     ai_result: AIReviewExecutionResult,
     policy_result: PolicyGateResult | None,
+    publication_job_id: str | None,
     deferred_reason_codes: tuple[str, ...],
 ) -> PostEnrichmentWorkflowResult:
     _write_audit_event(
@@ -144,6 +159,7 @@ def _finalize_result(
             "ai_review_reused": ai_result.reused,
             "ai_retry_override_applied": ai_result.retry_override_applied,
             "policy_reused": policy_result.reused if policy_result is not None else False,
+            "publication_job_id": publication_job_id,
             "deferred": cve.state is CveState.DEFERRED,
             "deferred_reason_codes": list(deferred_reason_codes),
         },
@@ -154,6 +170,7 @@ def _finalize_result(
         state=cve.state,
         ai_review_id=ai_result.review_id,
         policy_decision_id=policy_result.decision_id if policy_result is not None else None,
+        publication_job_id=publication_job_id,
         ai_review_attempted=ai_result.review_attempted,
         ai_review_skipped=ai_result.skipped,
         ai_review_reused=ai_result.reused,
