@@ -66,6 +66,7 @@ class AIReviewExecutionResult:
     review_attempted: bool
     skipped: bool
     reused: bool
+    retry_override_applied: bool
     route_reason: str
     state: CveState
     review_id: UUID | None
@@ -200,6 +201,7 @@ def execute_ai_review(
     provider: AIReviewProvider,
     *,
     requested_at: datetime | None = None,
+    retry_override: bool = False,
 ) -> AIReviewExecutionResult:
     cve = _get_cve_by_public_id(session, cve_id)
     classification = _get_latest_classification(session, cve.id)
@@ -208,6 +210,7 @@ def execute_ai_review(
 
     route = determine_ai_review_route(session, cve_id)
     state_before = cve.state
+    latest_ai_review = _get_latest_ai_review(session, cve.id)
 
     if not route.should_route:
         state_after = cve.state
@@ -236,6 +239,7 @@ def execute_ai_review(
             review_attempted=False,
             skipped=True,
             reused=False,
+            retry_override_applied=False,
             route_reason=route.reason,
             state=state_after,
             review_id=None,
@@ -246,8 +250,26 @@ def execute_ai_review(
 
     request_pack = build_ai_review_input_pack(session, cve_id, generated_at=requested_at)
     request_fingerprint = fingerprint_payload(request_pack)
+    if retry_override:
+        _validate_retry_override(cve_id, latest_ai_review)
+        _write_audit_event(
+            session,
+            cve=cve,
+            entity_type="ai_review",
+            entity_id=latest_ai_review.id if latest_ai_review is not None else None,
+            actor_type=AuditActorType.SYSTEM,
+            event_type="ai_review.retry_override_requested",
+            state_before=state_before,
+            state_after=cve.state,
+            details={
+                "request_fingerprint": request_fingerprint,
+                "previous_review_id": str(latest_ai_review.id) if latest_ai_review is not None else None,
+                "previous_outcome": latest_ai_review.outcome.value if latest_ai_review is not None else None,
+                "previous_schema_valid": latest_ai_review.schema_valid if latest_ai_review is not None else None,
+            },
+        )
     reusable_review = _get_reusable_ai_review(session, cve.id, request_fingerprint)
-    if reusable_review is not None:
+    if reusable_review is not None and retry_override is False:
         state_after = cve.state
         if reusable_review.schema_valid and cve.state in {
             CveState.CLASSIFIED,
@@ -283,6 +305,7 @@ def execute_ai_review(
             review_attempted=False,
             skipped=False,
             reused=True,
+            retry_override_applied=False,
             route_reason=route.reason,
             state=state_after,
             review_id=reusable_review.id,
@@ -352,6 +375,7 @@ def execute_ai_review(
         review_attempted=True,
         skipped=False,
         reused=False,
+        retry_override_applied=retry_override,
         route_reason=route.reason,
         state=cve.state,
         review_id=ai_review.id,
@@ -492,6 +516,25 @@ def _get_reusable_ai_review(session: Session, cve_pk: UUID, request_fingerprint:
         .order_by(AIReview.created_at.desc(), AIReview.id.desc())
         .limit(1)
     )
+
+
+def _get_latest_ai_review(session: Session, cve_pk: UUID) -> AIReview | None:
+    return session.scalar(
+        select(AIReview)
+        .where(AIReview.cve_id == cve_pk)
+        .order_by(AIReview.created_at.desc(), AIReview.id.desc())
+        .limit(1)
+    )
+
+
+def _validate_retry_override(cve_id: str, latest_ai_review: AIReview | None) -> None:
+    if latest_ai_review is None:
+        raise ValueError(f"retry_override requires an existing AI review for {cve_id}")
+    if latest_ai_review.schema_valid is False:
+        return
+    if latest_ai_review.outcome is AIReviewOutcome.ADVISORY_DEFER:
+        return
+    raise ValueError(f"retry_override is only allowed for invalid or advisory-defer AI reviews: {cve_id}")
 
 
 def _resolve_state(current_state: CveState, desired_state: CveState) -> CveState:

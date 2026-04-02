@@ -9,6 +9,7 @@ from sqlalchemy.orm import Session
 
 from cve_service.models.entities import AuditEvent, CVE, Evidence
 from cve_service.models.enums import AuditActorType, EvidenceSignal, EvidenceSourceType, EvidenceStatus
+from cve_service.services.post_enrichment_queue import PostEnrichmentJobProducer
 
 LOW_CONFIDENCE_THRESHOLD = 0.6
 DEFAULT_FRESHNESS_TTL_SECONDS = 30 * 24 * 60 * 60
@@ -93,7 +94,13 @@ class RefreshRunResult:
     cve_ids: tuple[str, ...]
 
 
-def record_evidence(session: Session, evidence_input: EvidenceInput) -> Evidence:
+def record_evidence(
+    session: Session,
+    evidence_input: EvidenceInput,
+    *,
+    post_enrichment_producer: PostEnrichmentJobProducer | None = None,
+    retry_ai_review: bool = False,
+) -> Evidence:
     cve = _get_cve_by_public_id(session, evidence_input.cve_id)
     normalized_input = _normalize_evidence_input(evidence_input)
     existing_evidence = _latest_evidence_by_source_identity(
@@ -162,6 +169,8 @@ def record_evidence(session: Session, evidence_input: EvidenceInput) -> Evidence
         evidence_input.cve_id,
         evaluated_at=normalized_input.collected_at,
         trigger="evidence_upsert",
+        post_enrichment_producer=post_enrichment_producer,
+        retry_ai_review=retry_ai_review,
     )
     return evidence
 
@@ -173,6 +182,8 @@ def compute_enrichment_summary(
     evaluated_at: datetime | None = None,
     trigger: str = "manual_recompute",
     actor_type: AuditActorType = AuditActorType.SYSTEM,
+    post_enrichment_producer: PostEnrichmentJobProducer | None = None,
+    retry_ai_review: bool = False,
 ) -> EnrichmentSummary:
     cve = _get_cve_by_public_id(session, cve_id)
     evidence_items = session.scalars(
@@ -228,6 +239,17 @@ def compute_enrichment_summary(
         signal_type=EvidenceSignal.ITW,
         summary=itw_summary,
     )
+
+    if post_enrichment_producer is not None:
+        post_enrichment_producer.schedule(
+            session,
+            cve.cve_id,
+            trigger=trigger,
+            requested_at=normalized_evaluated_at,
+            evaluated_at=normalized_evaluated_at,
+            retry_ai_review=retry_ai_review,
+            actor_type=actor_type,
+        )
 
     return EnrichmentSummary(
         cve_id=cve.cve_id,
@@ -345,6 +367,8 @@ def refresh_stale_evidence(
     limit: int | None = None,
     actor_type: AuditActorType = AuditActorType.WORKER,
     trigger: str = "stale_refresh",
+    post_enrichment_producer: PostEnrichmentJobProducer | None = None,
+    retry_ai_review: bool = False,
 ) -> RefreshRunResult:
     effective_evaluated_at = _normalize_datetime(evaluated_at) or datetime.now(UTC)
     targets = find_stale_evidence_targets(session, evaluated_at=effective_evaluated_at, limit=limit)
@@ -381,6 +405,8 @@ def refresh_stale_evidence(
             evaluated_at=effective_evaluated_at,
             trigger=trigger,
             actor_type=actor_type,
+            post_enrichment_producer=post_enrichment_producer,
+            retry_ai_review=retry_ai_review,
         )
 
     return RefreshRunResult(

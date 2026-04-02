@@ -24,6 +24,7 @@ class PostEnrichmentWorkflowResult:
     ai_review_attempted: bool
     ai_review_skipped: bool
     ai_review_reused: bool
+    ai_retry_override_applied: bool
     policy_reused: bool
     deferred: bool
     deferred_reason_codes: tuple[str, ...]
@@ -36,6 +37,7 @@ def process_post_enrichment_workflow(
     *,
     requested_at: datetime | None = None,
     evaluated_at: datetime | None = None,
+    retry_ai_review: bool = False,
     actor_type: AuditActorType = AuditActorType.WORKER,
 ) -> PostEnrichmentWorkflowResult:
     cve = _get_cve_by_public_id(session, cve_id)
@@ -58,7 +60,13 @@ def process_post_enrichment_workflow(
         },
     )
 
-    ai_result = execute_ai_review(session, cve_id, provider, requested_at=requested_at)
+    ai_result = execute_ai_review(
+        session,
+        cve_id,
+        provider,
+        requested_at=requested_at,
+        retry_override=retry_ai_review,
+    )
     policy_result: PolicyGateResult | None = None
 
     if ai_result.review_id is not None and ai_result.schema_valid is False:
@@ -134,6 +142,7 @@ def _finalize_result(
             "ai_review_attempted": ai_result.review_attempted,
             "ai_review_skipped": ai_result.skipped,
             "ai_review_reused": ai_result.reused,
+            "ai_retry_override_applied": ai_result.retry_override_applied,
             "policy_reused": policy_result.reused if policy_result is not None else False,
             "deferred": cve.state is CveState.DEFERRED,
             "deferred_reason_codes": list(deferred_reason_codes),
@@ -148,6 +157,7 @@ def _finalize_result(
         ai_review_attempted=ai_result.review_attempted,
         ai_review_skipped=ai_result.skipped,
         ai_review_reused=ai_result.reused,
+        ai_retry_override_applied=ai_result.retry_override_applied,
         policy_reused=policy_result.reused if policy_result is not None else False,
         deferred=cve.state is CveState.DEFERRED,
         deferred_reason_codes=deferred_reason_codes,
