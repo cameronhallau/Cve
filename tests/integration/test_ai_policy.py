@@ -175,7 +175,7 @@ def test_ai_advisory_can_influence_allowed_policy_fields_with_replayable_snapsho
     assert review_result.schema_valid is True
     assert review_result.outcome is AIReviewOutcome.ADVISORY_PUBLISH
     assert gate.decision is PolicyDecisionOutcome.PUBLISH
-    assert gate.reason_codes == ("policy.publish.ai_confirmed_with_poc",)
+    assert gate.reason_codes == ("policy.publish.ai_confirmed_initial_access_path",)
     assert cve is not None
     assert cve.state is CveState.PUBLISH_PENDING
     assert decision is not None

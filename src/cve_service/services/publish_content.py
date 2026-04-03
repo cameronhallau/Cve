@@ -40,6 +40,7 @@ def build_initial_publish_content(
     canonical_name = classification.details.get("canonical_name")
     product_scope = classification.details.get("product_scope")
     evidence_label = _derive_evidence_label(cve.poc_status, cve.itw_status)
+    external_enrichment = getattr(cve, "external_enrichment", {}) or {}
     title = f"{cve.cve_id}: {cve.title or 'Untitled vulnerability'}"
     summary = " | ".join(
         part
@@ -60,6 +61,11 @@ def build_initial_publish_content(
         (
             f"Exploit Evidence: PoC={cve.poc_status.value} ({_format_confidence(cve.poc_confidence)}), "
             f"ITW={cve.itw_status.value} ({_format_confidence(cve.itw_confidence)})"
+        ),
+        *(
+            [f"External Enrichment: {_format_external_enrichment(external_enrichment)}"]
+            if external_enrichment
+            else []
         ),
         f"AI Advisory Used: {'yes' if ai_review is not None and ai_review.schema_valid else 'no'}",
         f"Description: {cve.description or 'No description provided.'}",
@@ -86,6 +92,7 @@ def build_initial_publish_content(
         "policy_version": decision.policy_version,
         "policy_reason_codes": list(decision.reason_codes),
         "ai_review_used": bool(ai_review is not None and ai_review.schema_valid),
+        "external_enrichment": external_enrichment,
     }
     return PublishContent(
         schema_version=PUBLISH_CONTENT_SCHEMA_VERSION,
@@ -197,6 +204,41 @@ def _format_confidence(value: float | None) -> str:
     if value is None:
         return "n/a"
     return f"{value:.2f}"
+
+
+def _format_external_enrichment(summary: dict[str, Any]) -> str:
+    sources = summary.get("sources") if isinstance(summary, dict) else None
+    if not isinstance(sources, dict) or not sources:
+        return "not-run"
+
+    formatted_sources: list[str] = []
+    for source_name, source_summary in sources.items():
+        if not isinstance(source_summary, dict):
+            continue
+        status = source_summary.get("status") or "unknown"
+        if source_name == "epss":
+            score = source_summary.get("score")
+            percentile = source_summary.get("percentile")
+            if score is not None and percentile is not None:
+                formatted_sources.append(f"epss={float(score):.4f}/{float(percentile):.2f}")
+            else:
+                formatted_sources.append(f"epss={status}")
+            continue
+
+        if status != "completed":
+            formatted_sources.append(f"{source_name}={status}")
+            continue
+
+        match_count = source_summary.get("match_count")
+        matched = source_summary.get("matched")
+        if matched is True:
+            formatted_sources.append(f"{source_name}=match({match_count or 1})")
+        elif matched is False:
+            formatted_sources.append(f"{source_name}=none")
+        else:
+            formatted_sources.append(f"{source_name}=checked")
+
+    return ", ".join(formatted_sources) if formatted_sources else "not-run"
 
 
 def _format_snapshot_signal(snapshot: dict[str, Any], signal_name: str) -> str:

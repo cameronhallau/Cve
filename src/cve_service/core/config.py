@@ -14,8 +14,12 @@ class Settings(BaseSettings):
     redis_url: str = "redis://localhost:56379/0"
     rq_queue_name: str = "cve-phase0"
     health_timeout_seconds: float = Field(default=2.0, gt=0)
+    external_enrichment_enabled: bool = False
+    external_enrichment_timeout_seconds: float = Field(default=10.0, gt=0)
+    external_enrichment_cache_ttl_seconds: int = Field(default=3600, gt=0)
+    external_enrichment_max_matches: int = Field(default=5, gt=0, le=25)
     ai_provider: str = "openrouter"
-    ai_model: str = "openai/gpt-5.2"
+    ai_model: str = "deepseek/deepseek-v3.2"
     ai_timeout_seconds: float = Field(default=30.0, gt=0)
     ai_max_completion_tokens: int = Field(default=400, gt=0)
     ai_temperature: float = Field(default=0.0, ge=0.0, le=2.0)
@@ -26,6 +30,21 @@ class Settings(BaseSettings):
     )
     openrouter_http_referer: str | None = None
     openrouter_title: str | None = None
+    vulncheck_kev_url: str = "https://api.vulncheck.com/v3/backup/vulncheck-kev"
+    vulncheck_api_key: str | None = Field(
+        default=None,
+        validation_alias=AliasChoices("CVE_VULNCHECK_API_KEY", "VULNCHECK_API_KEY"),
+    )
+    epss_url: str = "https://api.first.org/data/v1/epss"
+    github_poc_enabled: bool = False
+    github_api_base_url: str = "https://api.github.com"
+    github_api_version: str = "2026-03-10"
+    github_token: str | None = Field(
+        default=None,
+        validation_alias=AliasChoices("CVE_GITHUB_TOKEN", "GITHUB_TOKEN"),
+    )
+    searchsploit_binary_path: str = "searchsploit"
+    exploitdb_search_url: str = "https://www.exploit-db.com/search"
     publish_target_name: str = "console"
     cve_org_delta_log_url: str = "https://raw.githubusercontent.com/CVEProject/cvelistV5/main/cves/deltaLog.json"
     cve_org_http_timeout_seconds: float = Field(default=20.0, gt=0)

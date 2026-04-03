@@ -53,6 +53,7 @@ class CVE(UUIDPrimaryKeyMixin, TimestampMixin, Base):
         nullable=False,
     )
     itw_confidence: Mapped[float | None] = mapped_column(Float())
+    external_enrichment: Mapped[dict[str, Any]] = mapped_column(JSONB, default=dict, nullable=False)
     last_policy_outcome: Mapped[PolicyDecisionOutcome | None] = mapped_column(
         Enum(PolicyDecisionOutcome, name="policy_decision_outcome")
     )

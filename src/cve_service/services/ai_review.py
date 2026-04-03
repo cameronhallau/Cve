@@ -21,6 +21,7 @@ from cve_service.services.state_machine import InvalidStateTransition, guard_tra
 REQUEST_SCHEMA_VERSION = "phase3-ai-review-request.v1"
 PROMPT_VERSION = "phase3-ai-review.v1"
 AI_SCHEMA_VALIDATION_METRIC_KEY = "phase5.ai_review.validation.total"
+PUBLISHABLE_EXPLOIT_PATHS = {"internet_exploitable", "phishing_initial_access"}
 
 
 class AIReviewProvider(Protocol):
@@ -117,7 +118,8 @@ def build_ai_review_input_pack(
         },
         "task": {
             "review_focus": (
-                "Assess enterprise relevance and likely exploit path for this ambiguous High/Critical CVE. "
+                "Assess enterprise relevance and whether this High/Critical CVE supports direct internet exploitation "
+                "or initial access via phishing delivery. "
                 "AI is advisory only and must not invent deterministic decisions."
             ),
             "allowed_output_fields": [
@@ -168,9 +170,9 @@ def determine_ai_review_route(session: Session, cve_id: str) -> AIRouteDecision:
     if classification.outcome is ClassificationOutcome.CANDIDATE:
         return AIRouteDecision(
             cve_id=cve.cve_id,
-            should_route=False,
-            advance_to_policy=True,
-            reason="deterministic_non_ambiguous",
+            should_route=True,
+            advance_to_policy=False,
+            reason="enterprise_candidate_requires_exploit_path_review",
             classification_outcome=classification.outcome,
             current_state=cve.state,
         )
@@ -481,7 +483,7 @@ def _derive_ai_review_outcome(advisory_payload: dict[str, Any]) -> AIReviewOutco
     exploit_path = advisory_payload["exploit_path_assessment"]
     if enterprise_relevance == "enterprise_unlikely":
         return AIReviewOutcome.ADVISORY_SUPPRESS
-    if enterprise_relevance == "enterprise_relevant" and exploit_path == "internet_exploitable":
+    if enterprise_relevance == "enterprise_relevant" and exploit_path in PUBLISHABLE_EXPLOIT_PATHS:
         return AIReviewOutcome.ADVISORY_PUBLISH
     return AIReviewOutcome.ADVISORY_DEFER
 

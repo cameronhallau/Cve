@@ -28,6 +28,13 @@ def test_build_initial_publish_content_is_canonical_and_replayable() -> None:
         poc_confidence=0.92,
         itw_status=EvidenceStatus.UNKNOWN,
         itw_confidence=None,
+        external_enrichment={
+            "sources": {
+                "github_poc": {"status": "completed", "matched": True, "match_count": 2},
+                "exploitdb": {"status": "completed", "matched": True, "match_count": 1},
+                "epss": {"status": "completed", "score": 0.87, "percentile": 0.98},
+            }
+        },
     )
     classification = Classification(
         id=uuid4(),
@@ -74,8 +81,10 @@ def test_build_initial_publish_content_is_canonical_and_replayable() -> None:
     assert content.title == "CVE-2026-0700: Exchange Server RCE"
     assert content.summary == "CRITICAL | microsoft:exchange_server | poc"
     assert "Policy Decision: PUBLISH" in content.body
+    assert "External Enrichment: github_poc=match(2), exploitdb=match(1), epss=0.8700/0.98" in content.body
     assert "AI Advisory Used: yes" in content.body
     assert content.metadata["policy_reason_codes"] == ["policy.publish.enterprise_candidate_with_poc"]
+    assert content.metadata["external_enrichment"]["sources"]["github_poc"]["match_count"] == 2
     assert content.as_payload()["labels"][0] == "severity:critical"
 
 

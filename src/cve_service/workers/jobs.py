@@ -12,6 +12,7 @@ from cve_service.core.db import create_session_factory, session_scope
 from cve_service.services.ai_provider import build_ai_review_provider
 from cve_service.services.alerting import evaluate_operational_alerts
 from cve_service.services.enrichment import refresh_stale_evidence
+from cve_service.services.external_enrichment import run_external_enrichment_checks
 from cve_service.services.post_enrichment import process_post_enrichment_workflow
 from cve_service.services.publish_queue import RQPublishJobProducer
 from cve_service.services.publication import publish_publication
@@ -142,7 +143,13 @@ def process_post_enrichment_workflow_job(
                 publish_target_name=publish_target_name,
                 publish_target_behavior=publish_target_behavior,
             )
+        external_enrichment_result = None
         with session_scope(session_factory) as session:
+            external_enrichment_result = run_external_enrichment_checks(
+                session,
+                cve_id,
+                settings,
+            )
             provider = build_ai_review_provider(
                 settings,
                 ai_payload=ai_payload,
@@ -171,6 +178,15 @@ def process_post_enrichment_workflow_job(
             "policy_reused": result.policy_reused,
             "deferred": result.deferred,
             "deferred_reason_codes": list(result.deferred_reason_codes),
+            "external_enrichment_completed_at": (
+                external_enrichment_result.completed_at.isoformat()
+                if external_enrichment_result is not None and external_enrichment_result.completed_at is not None
+                else None
+            ),
+            "external_enrichment_reused": (
+                external_enrichment_result.reused if external_enrichment_result is not None else False
+            ),
+            "external_enrichment": external_enrichment_result.summary if external_enrichment_result is not None else {},
         }
     finally:
         if redis_client is not None:

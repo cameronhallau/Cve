@@ -2,6 +2,7 @@
 
 These unit files provide the checked-in single-server production baseline for autonomous operation.
 
+- [cve-api.service](/home/cam/Documents/Github/Vuln/Cve/systemd/cve-api.service)
 - [cve-worker.service](/home/cam/Documents/Github/Vuln/Cve/systemd/cve-worker.service)
 - [cve-ingest-poll.service](/home/cam/Documents/Github/Vuln/Cve/systemd/cve-ingest-poll.service)
 - [cve-ingest-poll.timer](/home/cam/Documents/Github/Vuln/Cve/systemd/cve-ingest-poll.timer)

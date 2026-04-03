@@ -27,6 +27,7 @@ class OpenRouterProvider:
     timeout_seconds: float
     max_completion_tokens: int
     temperature: float
+    reasoning_enabled: bool = False
     http_referer: str | None = None
     title: str | None = None
     client: httpx.Client | None = None
@@ -37,6 +38,17 @@ class OpenRouterProvider:
             "messages": _build_messages(request),
             "temperature": self.temperature,
             "max_completion_tokens": self.max_completion_tokens,
+            # Ask OpenRouter to keep reasoning out of the assistant message and
+            # enforce a JSON response shape when the model supports it.
+            "reasoning": {"enabled": self.reasoning_enabled, "exclude": True},
+            "response_format": {
+                "type": "json_schema",
+                "json_schema": {
+                    "name": "ai_review_response",
+                    "strict": True,
+                    "schema": request.response_schema,
+                },
+            },
         }
         response_data = self._client.post(
             f"{self.base_url.rstrip('/')}/chat/completions",
@@ -51,9 +63,10 @@ class OpenRouterProvider:
         except (KeyError, IndexError, TypeError) as exc:
             raise ValueError("OpenRouter response did not contain a chat completion message") from exc
 
+        extracted_content = _extract_message_content(content)
         return AIProviderResponse(
             model_name=str(body.get("model") or self.model),
-            payload=_extract_message_content(content),
+            payload=extracted_content,
             prompt_version=request.prompt_version,
         )
 
@@ -97,6 +110,7 @@ def build_ai_review_provider(
             timeout_seconds=settings.ai_timeout_seconds,
             max_completion_tokens=settings.ai_max_completion_tokens,
             temperature=settings.ai_temperature,
+            reasoning_enabled=False,
             http_referer=settings.openrouter_http_referer,
             title=settings.openrouter_title,
             client=client,
@@ -133,18 +147,55 @@ def _build_messages(request: AIProviderRequest) -> list[dict[str, str]]:
 def _extract_message_content(content: Any) -> str:
     if isinstance(content, str):
         return content
+    if isinstance(content, dict):
+        extracted = _extract_dict_content(content)
+        if extracted:
+            return extracted
     if isinstance(content, list):
         text_parts: list[str] = []
         for item in content:
-            if isinstance(item, dict):
-                if isinstance(item.get("text"), str):
-                    text_parts.append(item["text"])
-                    continue
-                if item.get("type") == "text" and isinstance(item.get("content"), str):
-                    text_parts.append(item["content"])
-                    continue
-            if isinstance(item, str):
-                text_parts.append(item)
+            extracted = _extract_message_content_part(item)
+            if extracted:
+                text_parts.append(extracted)
         if text_parts:
             return "".join(text_parts)
     raise ValueError("OpenRouter response content was empty or unsupported")
+
+
+def _extract_message_content_part(item: Any) -> str | None:
+    if isinstance(item, str):
+        return item
+    if isinstance(item, dict):
+        return _extract_dict_content(item)
+    return None
+
+
+def _extract_dict_content(item: dict[str, Any]) -> str | None:
+    if isinstance(item.get("text"), str):
+        return item["text"]
+    if isinstance(item.get("content"), str):
+        return item["content"]
+    if isinstance(item.get("output_text"), str):
+        return item["output_text"]
+
+    nested_content = item.get("content")
+    if isinstance(nested_content, list):
+        nested_text = "".join(
+            extracted
+            for part in nested_content
+            if (extracted := _extract_message_content_part(part))
+        )
+        if nested_text:
+            return nested_text
+
+    nested_text = item.get("text")
+    if isinstance(nested_text, list):
+        joined = "".join(
+            extracted
+            for part in nested_text
+            if (extracted := _extract_message_content_part(part))
+        )
+        if joined:
+            return joined
+
+    return None

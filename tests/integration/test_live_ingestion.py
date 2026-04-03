@@ -259,6 +259,128 @@ def test_live_poll_records_fetch_or_parse_failures_deterministically(session_fac
     assert metric.last_details["error_stage"] == "record_adapt"
 
 
+def test_live_poll_skips_rejected_records_and_advances_checkpoint(session_factory) -> None:
+    rejected_record_url = "https://raw.githubusercontent.com/CVEProject/cvelistV5/main/cves/2026/3xxx/CVE-2026-3076.json"
+    source_client = StaticLiveSourceClient(
+        [
+            _delta_entry(
+                "2026-04-02T14:00:00Z",
+                [
+                    {
+                        "cveId": "CVE-2026-3076",
+                        "githubLink": rejected_record_url,
+                        "dateUpdated": "2026-03-03T22:17:13.524Z",
+                    }
+                ],
+            )
+        ],
+        {
+            rejected_record_url: {
+                "cveMetadata": {
+                    "cveId": "CVE-2026-3076",
+                    "state": "REJECTED",
+                    "dateUpdated": "2026-03-03T22:17:13.524Z",
+                },
+                "containers": {
+                    "cna": {
+                        "rejectedReasons": [
+                            {"lang": "en", "value": "Duplicate reservation."},
+                        ]
+                    }
+                },
+            }
+        },
+    )
+
+    with session_scope(session_factory) as session:
+        result = poll_live_cve_org_feed(session, source_client, polled_at=datetime(2026, 4, 2, 14, 1, tzinfo=UTC))
+        progress = session.scalar(select(SourceProgress).where(SourceProgress.source_name == "cve.org"))
+        cves = session.scalars(select(CVE)).all()
+        metric = _get_metric(
+            session,
+            LIVE_INGEST_RUN_METRIC_KEY,
+            {"failure_stage": "none", "result": "succeeded", "source_name": "cve.org"},
+        )
+
+    assert result.status == "succeeded"
+    assert result.checkpoint_before is None
+    assert result.checkpoint_after == "2026-04-02T14:00:00+00:00"
+    assert result.records_fetched == 1
+    assert result.ingested_records == 0
+    assert result.snapshots_created == 0
+    assert result.classifications_created == 0
+    assert progress is not None
+    assert progress.cursor == {"last_successful_fetch_time": "2026-04-02T14:00:00+00:00"}
+    assert progress.last_run_status == "SUCCEEDED"
+    assert len(cves) == 0
+    assert metric is not None
+    assert metric.total_count == 1
+
+
+def test_live_poll_skips_records_with_only_na_affected_entries(session_factory) -> None:
+    record_url = "https://raw.githubusercontent.com/CVEProject/cvelistV5/main/cves/2026/25xxx/CVE-2026-25828.json"
+    source_client = StaticLiveSourceClient(
+        [
+            _delta_entry(
+                "2026-04-02T15:00:00Z",
+                [
+                    {
+                        "cveId": "CVE-2026-25828",
+                        "githubLink": record_url,
+                        "dateUpdated": "2026-03-04T07:56:41.457Z",
+                    }
+                ],
+            )
+        ],
+        {
+            record_url: {
+                "cveMetadata": {
+                    "cveId": "CVE-2026-25828",
+                    "state": "PUBLISHED",
+                    "dateUpdated": "2026-03-04T07:56:41.457Z",
+                },
+                "containers": {
+                    "cna": {
+                        "descriptions": [
+                            {"lang": "en", "value": "Affected vendor and product are both n/a."},
+                        ],
+                        "affected": [
+                            {
+                                "vendor": "n/a",
+                                "product": "n/a",
+                            }
+                        ],
+                    }
+                },
+            }
+        },
+    )
+
+    with session_scope(session_factory) as session:
+        result = poll_live_cve_org_feed(session, source_client, polled_at=datetime(2026, 4, 2, 15, 1, tzinfo=UTC))
+        progress = session.scalar(select(SourceProgress).where(SourceProgress.source_name == "cve.org"))
+        cves = session.scalars(select(CVE)).all()
+        metric = _get_metric(
+            session,
+            LIVE_INGEST_RUN_METRIC_KEY,
+            {"failure_stage": "none", "result": "succeeded", "source_name": "cve.org"},
+        )
+
+    assert result.status == "succeeded"
+    assert result.checkpoint_before is None
+    assert result.checkpoint_after == "2026-04-02T15:00:00+00:00"
+    assert result.records_fetched == 1
+    assert result.ingested_records == 0
+    assert result.snapshots_created == 0
+    assert result.classifications_created == 0
+    assert progress is not None
+    assert progress.cursor == {"last_successful_fetch_time": "2026-04-02T15:00:00+00:00"}
+    assert progress.last_run_status == "SUCCEEDED"
+    assert len(cves) == 0
+    assert metric is not None
+    assert metric.total_count == 1
+
+
 def _delta_entry(fetch_time: str, new_changes: list[dict[str, str]]) -> DeltaEntry:
     return DeltaEntry(
         fetchTime=fetch_time,

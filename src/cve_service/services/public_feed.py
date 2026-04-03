@@ -13,6 +13,8 @@ class CveOrgRecordAdapter(BaseModel):
 
     def adapt(self, payload: dict[str, Any]) -> PublicFeedRecord:
         metadata = payload.get("cveMetadata", {})
+        if _is_rejected_record(metadata):
+            raise ValueError("public feed record is rejected and should not be ingested")
         cna = payload.get("containers", {}).get("cna", {})
         affected = _first_affected_product(cna.get("affected", []))
 
@@ -62,6 +64,11 @@ def _first_affected_product(affected: list[dict[str, Any]]) -> dict[str, str]:
         if vendor and product and product != "n/a":
             return {"vendor": str(vendor), "product": str(product)}
     raise ValueError("public feed record is missing an affected vendor/product pair")
+
+
+def _is_rejected_record(metadata: dict[str, Any]) -> bool:
+    state = metadata.get("state")
+    return isinstance(state, str) and state.upper() == "REJECTED"
 
 
 def _parse_datetime(value: str | None) -> datetime | None:

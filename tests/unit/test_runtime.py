@@ -88,7 +88,7 @@ def test_handle_ingest_poll_once_calls_live_poll_service(monkeypatch) -> None:
         cve_org_delta_log_url="https://raw.githubusercontent.com/CVEProject/cvelistV5/main/cves/deltaLog.json",
         cve_org_http_timeout_seconds=20.0,
         database_url="postgresql://example.test/cve",
-        ai_model="openai/gpt-5.2",
+        ai_model="deepseek/deepseek-v3.2",
     )
 
     exit_code = _handle_ingest_poll_once(settings, argparse.Namespace(polled_at="2026-04-02T14:00:00+00:00"))

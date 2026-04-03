@@ -66,7 +66,7 @@ _REGISTRY: dict[str, ReasonCodeDefinition] = {
     "policy.defer.ai_uncertain_exploit_path": ReasonCodeDefinition(
         code="policy.defer.ai_uncertain_exploit_path",
         title="AI Uncertain Exploit Path",
-        summary="The AI advisory did not clearly confirm an internet-exploitable path, so policy fails closed.",
+        summary="The AI advisory did not clearly confirm a direct internet exploit path or phishing-delivered initial access path, so policy fails closed.",
     ),
     "policy.defer.ai_evidence_conflict": ReasonCodeDefinition(
         code="policy.defer.ai_evidence_conflict",
@@ -92,6 +92,16 @@ _REGISTRY: dict[str, ReasonCodeDefinition] = {
         code="policy.publish.ai_confirmed_with_poc",
         title="AI Confirmed With PoC",
         summary="AI confirmed enterprise relevance and exploitability, and trusted PoC evidence is present.",
+    ),
+    "policy.publish.ai_confirmed_initial_access_path": ReasonCodeDefinition(
+        code="policy.publish.ai_confirmed_initial_access_path",
+        title="AI Confirmed Initial Access Path",
+        summary="AI confirmed enterprise relevance and either a direct internet exploit path or phishing-delivered initial access path, so the record is publishable without waiting for PoC or ITW evidence.",
+    ),
+    "policy.publish.enterprise_candidate_with_initial_access_path": ReasonCodeDefinition(
+        code="policy.publish.enterprise_candidate_with_initial_access_path",
+        title="Enterprise Candidate With Initial Access Path",
+        summary="The deterministic enterprise candidate is publishable because AI confirmed a direct internet exploit path or phishing-delivered initial access path.",
     ),
     "policy.publish.enterprise_candidate_with_itw": ReasonCodeDefinition(
         code="policy.publish.enterprise_candidate_with_itw",

@@ -24,6 +24,13 @@ Use this checklist for the first single-server autonomous production rollout on 
   - `CVE_DATABASE_URL`
   - `CVE_REDIS_URL`
   - `CVE_RQ_QUEUE_NAME`
+  - `CVE_EXTERNAL_ENRICHMENT_ENABLED=true`
+  - `CVE_VULNCHECK_KEV_URL`
+  - `VULNCHECK_API_KEY`
+  - `CVE_EPSS_URL`
+  - `CVE_GITHUB_POC_ENABLED=false`
+  - `CVE_SEARCHSPLOIT_BINARY_PATH`
+  - `CVE_EXPLOITDB_SEARCH_URL`
   - `OPENROUTER_API_KEY`
   - `CVE_PUBLISH_TARGET_NAME=x`
   - `CVE_X_AUTH_MODE=oauth1_user`
@@ -31,10 +38,28 @@ Use this checklist for the first single-server autonomous production rollout on 
   - `CVE_X_CONSUMER_SECRET`
   - `CVE_X_ACCESS_TOKEN`
   - `CVE_X_ACCESS_TOKEN_SECRET`
+- optional only if you explicitly enable GitHub PoC matching:
+  - `CVE_GITHUB_POC_ENABLED=true`
+  - `CVE_GITHUB_API_BASE_URL`
+  - `CVE_GITHUB_API_VERSION`
+  - `GITHUB_TOKEN`
+
+## 2a. Install SearchSploit
+
+Ubuntu-class hosts usually do not provide a `searchsploit` package directly. Install it from the Exploit-DB repo:
+
+```bash
+sudo apt-get update
+sudo apt-get install -y git
+sudo git clone https://github.com/offensive-security/exploitdb.git /opt/exploitdb || sudo git -C /opt/exploitdb pull --ff-only
+sudo ln -sf /opt/exploitdb/searchsploit /usr/local/bin/searchsploit
+searchsploit --help
+```
 
 ## 3. Install systemd Units
 
 - copy:
+  - [systemd/cve-api.service](/home/cam/Documents/Github/Vuln/Cve/systemd/cve-api.service)
   - [systemd/cve-worker.service](/home/cam/Documents/Github/Vuln/Cve/systemd/cve-worker.service)
   - [systemd/cve-ingest-poll.service](/home/cam/Documents/Github/Vuln/Cve/systemd/cve-ingest-poll.service)
   - [systemd/cve-ingest-poll.timer](/home/cam/Documents/Github/Vuln/Cve/systemd/cve-ingest-poll.timer)
@@ -51,6 +76,7 @@ Use this checklist for the first single-server autonomous production rollout on 
 
 ```bash
 sudo systemctl daemon-reload
+sudo systemctl enable --now cve-api.service
 sudo systemctl enable --now cve-worker.service
 sudo systemctl enable --now cve-ingest-poll.timer
 sudo systemctl enable --now cve-stale-refresh.timer
@@ -59,6 +85,8 @@ sudo systemctl enable --now cve-alert-eval.timer
 
 ## 5. Verify
 
+- api:
+  - `systemctl status cve-api.service`
 - worker:
   - `systemctl status cve-worker.service`
 - timers:
@@ -89,6 +117,8 @@ sudo systemctl enable --now cve-alert-eval.timer
   - `sudo systemctl disable --now cve-alert-eval.timer`
 - stop worker:
   - `sudo systemctl disable --now cve-worker.service`
+- stop api:
+  - `sudo systemctl disable --now cve-api.service`
 - preserve:
   - `source_progress`
   - `audit_events`

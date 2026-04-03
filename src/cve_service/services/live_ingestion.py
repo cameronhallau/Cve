@@ -239,6 +239,8 @@ def poll_live_cve_org_feed(
         post_enrichment_jobs: list[str] = []
         for change in collapsed_changes:
             raw_record = source_client.fetch_record(change.github_link)
+            if _should_skip_upstream_record(raw_record):
+                continue
             try:
                 record = adapter_instance.adapt(raw_record)
             except (ValidationError, ValueError, KeyError) as exc:
@@ -568,3 +570,36 @@ def _validate_url(url: str, *, allowed_hosts: set[str], stage: str) -> None:
             "upstream URL did not match the allowed host policy",
             details={"url": url, "allowed_hosts": sorted(allowed_hosts)},
         )
+
+
+def _should_skip_upstream_record(payload: dict[str, Any]) -> bool:
+    return _is_rejected_upstream_record(payload) or _is_unusable_affected_record(payload)
+
+
+def _is_rejected_upstream_record(payload: dict[str, Any]) -> bool:
+    metadata = payload.get("cveMetadata", {})
+    state = metadata.get("state")
+    return isinstance(state, str) and state.upper() == "REJECTED"
+
+
+def _is_unusable_affected_record(payload: dict[str, Any]) -> bool:
+    cna = payload.get("containers", {}).get("cna", {})
+    affected = cna.get("affected", [])
+    if not isinstance(affected, list):
+        return True
+
+    for entry in affected:
+        if not isinstance(entry, dict):
+            continue
+        vendor = entry.get("vendor")
+        product = entry.get("product")
+        if (
+            isinstance(vendor, str)
+            and isinstance(product, str)
+            and vendor.strip()
+            and product.strip()
+            and vendor.strip().lower() != "n/a"
+            and product.strip().lower() != "n/a"
+        ):
+            return False
+    return True

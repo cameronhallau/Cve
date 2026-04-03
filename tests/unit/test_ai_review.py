@@ -80,13 +80,29 @@ def test_execute_ai_review_skips_non_ambiguous_candidate(session_factory) -> Non
         route = determine_ai_review_route(session, "CVE-2026-0302")
         result = execute_ai_review(session, "CVE-2026-0302", provider)
 
-    assert route.should_route is False
+    assert route.should_route is True
     assert route.classification_outcome is ClassificationOutcome.CANDIDATE
-    assert result.skipped is True
-    assert result.review_attempted is False
-    assert result.route_reason == "deterministic_non_ambiguous"
+    assert result.skipped is False
+    assert result.review_attempted is True
+    assert result.route_reason == "enterprise_candidate_requires_exploit_path_review"
     assert result.state is CveState.POLICY_PENDING
-    assert provider.requests == []
+    assert len(provider.requests) == 1
+
+
+def test_validate_ai_response_accepts_phishing_initial_access_path() -> None:
+    validation = validate_ai_response(
+        "CVE-2026-0304",
+        {
+            "cve_id": "CVE-2026-0304",
+            "enterprise_relevance_assessment": "enterprise_relevant",
+            "exploit_path_assessment": "phishing_initial_access",
+            "confidence": 0.9,
+            "reasoning_summary": "Likely initial access when delivered through phishing attachments or links.",
+        },
+    )
+
+    assert validation.schema_valid is True
+    assert validation.outcome is AIReviewOutcome.ADVISORY_PUBLISH
 
 
 def test_build_ai_review_input_pack_uses_phase3_contract(session_factory) -> None:

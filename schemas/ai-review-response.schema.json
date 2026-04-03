@@ -28,6 +28,7 @@
       "type": "string",
       "enum": [
         "internet_exploitable",
+        "phishing_initial_access",
         "adjacent_or_authenticated",
         "unclear"
       ]

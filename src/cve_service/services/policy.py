@@ -30,6 +30,7 @@ DEFAULT_AI_FIELDS = (
     "exploit_path_assessment",
     "confidence",
 )
+PUBLISHABLE_EXPLOIT_PATHS = {"internet_exploitable", "phishing_initial_access"}
 
 
 @dataclass(frozen=True, slots=True)
@@ -38,7 +39,7 @@ class PolicyRuntimeConfig:
     hard_deterministic_deny_absolute: bool = True
     deterministic_candidate_publish_on_itw: bool = True
     deterministic_candidate_publish_on_poc: bool = True
-    ai_requires_exploit_evidence: bool = True
+    ai_requires_exploit_evidence: bool = False
     fail_closed_on_ai_conflict: bool = True
     allowed_ai_fields: tuple[str, ...] = DEFAULT_AI_FIELDS
 
@@ -109,37 +110,6 @@ def evaluate_policy_inputs(
             rationale_summary="Deterministic classification deferred the CVE, so policy keeps it fail-closed.",
         )
 
-    if inputs.deterministic_outcome is ClassificationOutcome.CANDIDATE:
-        if policy_config.deterministic_candidate_publish_on_itw and inputs.itw_status is EvidenceStatus.PRESENT:
-            return _result(
-                inputs,
-                policy_config=policy_config,
-                decision=PolicyDecisionOutcome.PUBLISH,
-                reason_codes=("policy.publish.enterprise_candidate_with_itw",),
-                ai_fields_considered=(),
-                resolution_basis="deterministic_publish_with_itw",
-                rationale_summary="Enterprise candidate published because trusted in-the-wild evidence is present.",
-            )
-        if policy_config.deterministic_candidate_publish_on_poc and inputs.poc_status is EvidenceStatus.PRESENT:
-            return _result(
-                inputs,
-                policy_config=policy_config,
-                decision=PolicyDecisionOutcome.PUBLISH,
-                reason_codes=("policy.publish.enterprise_candidate_with_poc",),
-                ai_fields_considered=(),
-                resolution_basis="deterministic_publish_with_poc",
-                rationale_summary="Enterprise candidate published because trusted proof-of-concept evidence is present.",
-            )
-        return _result(
-            inputs,
-            policy_config=policy_config,
-            decision=PolicyDecisionOutcome.DEFER,
-            reason_codes=("policy.defer.awaiting_exploit_evidence",),
-            ai_fields_considered=(),
-            resolution_basis="awaiting_exploit_evidence",
-            rationale_summary="Enterprise candidate remains deferred until deterministic exploit evidence becomes publishable.",
-        )
-
     if not inputs.ai_schema_valid:
         reason = "policy.defer.ai_invalid_review" if inputs.ai_review_outcome is AIReviewOutcome.INVALID else "policy.defer.ai_review_required"
         return _result(
@@ -168,6 +138,27 @@ def evaluate_policy_inputs(
             resolution_basis="ai_low_confidence",
             rationale_summary="AI advisory confidence is below the configured threshold, so policy fails closed.",
         )
+    if inputs.deterministic_outcome is ClassificationOutcome.CANDIDATE:
+        if _is_publishable_exploit_path(exploit_path):
+            return _result(
+                inputs,
+                policy_config=policy_config,
+                decision=PolicyDecisionOutcome.PUBLISH,
+                reason_codes=("policy.publish.enterprise_candidate_with_initial_access_path",),
+                ai_fields_considered=ai_fields_considered,
+                resolution_basis="enterprise_candidate_with_initial_access_path",
+                rationale_summary="Enterprise candidate published because AI confirmed a direct internet exploit path or phishing-delivered initial access path.",
+            )
+        return _result(
+            inputs,
+            policy_config=policy_config,
+            decision=PolicyDecisionOutcome.DEFER,
+            reason_codes=("policy.defer.ai_uncertain_exploit_path",),
+            ai_fields_considered=ai_fields_considered,
+            resolution_basis="ai_uncertain_exploit_path",
+            rationale_summary="AI advisory did not confirm a direct internet exploit path or phishing-delivered initial access path, so policy defers.",
+        )
+
     if enterprise_relevance == "enterprise_unlikely":
         return _result(
             inputs,
@@ -188,7 +179,7 @@ def evaluate_policy_inputs(
             resolution_basis="ai_uncertain_enterprise_relevance",
             rationale_summary="AI advisory did not clearly confirm enterprise relevance, so policy defers.",
         )
-    if exploit_path != "internet_exploitable":
+    if not _is_publishable_exploit_path(exploit_path):
         return _result(
             inputs,
             policy_config=policy_config,
@@ -196,50 +187,16 @@ def evaluate_policy_inputs(
             reason_codes=("policy.defer.ai_uncertain_exploit_path",),
             ai_fields_considered=ai_fields_considered,
             resolution_basis="ai_uncertain_exploit_path",
-            rationale_summary="AI advisory did not confirm an internet-exploitable path, so policy defers.",
-        )
-    if (
-        policy_config.ai_requires_exploit_evidence
-        and inputs.poc_status is EvidenceStatus.ABSENT
-        and inputs.itw_status is EvidenceStatus.ABSENT
-    ):
-        return _result(
-            inputs,
-            policy_config=policy_config,
-            decision=PolicyDecisionOutcome.DEFER,
-            reason_codes=("policy.defer.ai_evidence_conflict",),
-            ai_fields_considered=ai_fields_considered,
-            resolution_basis="ai_evidence_conflict",
-            rationale_summary="AI advisory favored publication, but deterministic exploit evidence is explicitly absent, so policy fails closed.",
-        )
-    if inputs.itw_status is EvidenceStatus.PRESENT:
-        return _result(
-            inputs,
-            policy_config=policy_config,
-            decision=PolicyDecisionOutcome.PUBLISH,
-            reason_codes=("policy.publish.ai_confirmed_with_itw",),
-            ai_fields_considered=ai_fields_considered,
-            resolution_basis="ai_publish_with_itw",
-            rationale_summary="AI advisory confirmed enterprise relevance and exploitability, and in-the-wild evidence authorizes publication.",
-        )
-    if inputs.poc_status is EvidenceStatus.PRESENT:
-        return _result(
-            inputs,
-            policy_config=policy_config,
-            decision=PolicyDecisionOutcome.PUBLISH,
-            reason_codes=("policy.publish.ai_confirmed_with_poc",),
-            ai_fields_considered=ai_fields_considered,
-            resolution_basis="ai_publish_with_poc",
-            rationale_summary="AI advisory confirmed enterprise relevance and exploitability, and trusted proof-of-concept evidence authorizes publication.",
+            rationale_summary="AI advisory did not confirm a direct internet exploit path or phishing-delivered initial access path, so policy defers.",
         )
     return _result(
         inputs,
         policy_config=policy_config,
-        decision=PolicyDecisionOutcome.DEFER,
-        reason_codes=("policy.defer.awaiting_exploit_evidence",),
+        decision=PolicyDecisionOutcome.PUBLISH,
+        reason_codes=("policy.publish.ai_confirmed_initial_access_path",),
         ai_fields_considered=ai_fields_considered,
-        resolution_basis="awaiting_exploit_evidence",
-        rationale_summary="AI advisory was favorable, but policy still requires deterministic exploit evidence before publication.",
+        resolution_basis="ai_publish_with_initial_access_path",
+        rationale_summary="AI advisory confirmed enterprise relevance and a direct internet exploit path or phishing-delivered initial access path, so policy publishes without waiting for PoC or ITW evidence.",
     )
 
 
@@ -796,7 +753,12 @@ def _derive_ai_signal(inputs: PolicyEvaluationInput, policy_config: PolicyRuntim
         tendency = PolicyDecisionOutcome.SUPPRESS.value
     elif confidence < policy_config.ai_confidence_threshold:
         tendency = PolicyDecisionOutcome.DEFER.value
-    elif enterprise_relevance != "enterprise_relevant" or exploit_path != "internet_exploitable":
+    elif (
+        inputs.deterministic_outcome is ClassificationOutcome.CANDIDATE
+        and _is_publishable_exploit_path(exploit_path)
+    ):
+        tendency = PolicyDecisionOutcome.PUBLISH.value
+    elif enterprise_relevance != "enterprise_relevant" or not _is_publishable_exploit_path(exploit_path):
         tendency = PolicyDecisionOutcome.DEFER.value
     else:
         tendency = PolicyDecisionOutcome.PUBLISH.value
@@ -810,6 +772,10 @@ def _derive_ai_signal(inputs: PolicyEvaluationInput, policy_config: PolicyRuntim
         "exploit_path_assessment": exploit_path,
         "reasoning_summary": inputs.ai_advisory.get("reasoning_summary"),
     }
+
+
+def _is_publishable_exploit_path(exploit_path: str | None) -> bool:
+    return exploit_path in PUBLISHABLE_EXPLOIT_PATHS
 
 
 def _derive_evidence_signal(inputs: PolicyEvaluationInput) -> dict[str, Any]:

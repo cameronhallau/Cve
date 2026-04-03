@@ -10,6 +10,8 @@ Use this runbook for single-server autonomous production on X with:
 
 ## Required Runtime
 
+- continuous API:
+  - `.venv/bin/cve-api`
 - continuous worker:
   - `.venv/bin/cve-worker`
 - scheduled once-run commands:
@@ -23,6 +25,19 @@ Use this runbook for single-server autonomous production on X with:
   - `CVE_DATABASE_URL`
   - `CVE_REDIS_URL`
   - `CVE_RQ_QUEUE_NAME`
+- pre-publish external enrichment:
+  - `CVE_EXTERNAL_ENRICHMENT_ENABLED=true`
+  - `CVE_VULNCHECK_KEV_URL`
+  - `VULNCHECK_API_KEY`
+  - `CVE_EPSS_URL`
+  - `CVE_GITHUB_POC_ENABLED=false`
+  - `CVE_SEARCHSPLOIT_BINARY_PATH`
+  - `CVE_EXPLOITDB_SEARCH_URL`
+- optional only if you explicitly enable GitHub PoC matching:
+  - `CVE_GITHUB_POC_ENABLED=true`
+  - `CVE_GITHUB_API_BASE_URL`
+  - `CVE_GITHUB_API_VERSION`
+  - `GITHUB_TOKEN`
 - live CVE source:
   - `CVE_CVE_ORG_DELTA_LOG_URL`
   - `CVE_CVE_ORG_HTTP_TIMEOUT_SECONDS`
@@ -49,6 +64,10 @@ Checked-in deployment artifacts:
 - ingest polling:
   - every 10 minutes
   - responsibility: pull new or updated CVEs, persist `source_progress`, and enqueue post-enrichment work
+- post-enrichment worker:
+  - every queued run performs VulnCheck KEV, EPSS, SearchSploit, and Exploit-DB checks before AI policy evaluation
+  - GitHub PoC matching is optional and disabled by default because code-search hits were noisier than Exploit-DB/SearchSploit
+  - publication waits for those checks to complete, but PoC/ITW remains enrichment rather than a hard publish gate
 - stale refresh:
   - every hour
   - responsibility: reevaluate expired evidence summaries and enqueue update publications when material deltas exist
@@ -63,15 +82,41 @@ Use the checked-in unit files from [systemd/README.md](/home/cam/Documents/Githu
 Install flow:
 
 1. Copy `.env.production.example` into `/etc/cve-service/cve.env` and replace placeholder secrets.
-2. Copy the `systemd/*.service` and `systemd/*.timer` files into `/etc/systemd/system/`.
-3. Run `systemctl daemon-reload`.
-4. Enable and start:
+2. Install SearchSploit on Ubuntu-class hosts:
+   - `apt-get update`
+   - `apt-get install -y git`
+   - `git clone https://github.com/offensive-security/exploitdb.git /opt/exploitdb || git -C /opt/exploitdb pull --ff-only`
+   - `ln -sf /opt/exploitdb/searchsploit /usr/local/bin/searchsploit`
+   - `searchsploit --help`
+3. Copy the `systemd/*.service` and `systemd/*.timer` files into `/etc/systemd/system/`.
+4. Run `systemctl daemon-reload`.
+5. Enable and start:
+   - `cve-api.service`
    - `cve-worker.service`
    - `cve-ingest-poll.timer`
    - `cve-stale-refresh.timer`
    - `cve-alert-eval.timer`
 
 Reference layout:
+
+API service:
+
+```ini
+[Unit]
+Description=CVE API
+After=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/srv/cve/Cve
+EnvironmentFile=/etc/cve-service/cve.env
+ExecStart=/srv/cve/Cve/.venv/bin/cve-api
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+```
 
 Worker service:
 

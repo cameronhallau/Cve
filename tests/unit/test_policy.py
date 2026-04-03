@@ -4,7 +4,7 @@ from cve_service.models.enums import AIReviewOutcome, ClassificationOutcome, Evi
 from cve_service.services.policy import PolicyEvaluationInput, evaluate_policy_inputs
 
 
-def test_policy_publishes_deterministic_candidate_with_itw_signal() -> None:
+def test_policy_publishes_enterprise_candidate_with_ai_confirmed_initial_access_path() -> None:
     result = evaluate_policy_inputs(
         PolicyEvaluationInput(
             cve_id="CVE-2026-0400",
@@ -13,17 +13,27 @@ def test_policy_publishes_deterministic_candidate_with_itw_signal() -> None:
             deterministic_reason_codes=("classifier.candidate.enterprise_high_or_critical",),
             poc_status=EvidenceStatus.UNKNOWN,
             poc_confidence=None,
-            itw_status=EvidenceStatus.PRESENT,
-            itw_confidence=1.0,
-            ai_review_outcome=None,
-            ai_schema_valid=False,
-            ai_advisory=None,
+            itw_status=EvidenceStatus.UNKNOWN,
+            itw_confidence=None,
+            ai_review_outcome=AIReviewOutcome.ADVISORY_PUBLISH,
+            ai_schema_valid=True,
+            ai_advisory={
+                "cve_id": "CVE-2026-0400",
+                "enterprise_relevance_assessment": "enterprise_relevant",
+                "exploit_path_assessment": "phishing_initial_access",
+                "confidence": 0.9,
+                "reasoning_summary": "Likely initial access through phishing-delivered payloads in enterprise mailboxes.",
+            },
         )
     )
 
     assert result.decision is PolicyDecisionOutcome.PUBLISH
-    assert result.reason_codes == ("policy.publish.enterprise_candidate_with_itw",)
-    assert result.ai_fields_considered == ()
+    assert result.reason_codes == ("policy.publish.enterprise_candidate_with_initial_access_path",)
+    assert result.ai_fields_considered == (
+        "enterprise_relevance_assessment",
+        "exploit_path_assessment",
+        "confidence",
+    )
 
 
 def test_policy_defers_ai_candidate_without_valid_review() -> None:
@@ -47,7 +57,7 @@ def test_policy_defers_ai_candidate_without_valid_review() -> None:
     assert result.reason_codes == ("policy.defer.ai_review_required",)
 
 
-def test_policy_uses_ai_only_for_allowed_fields_and_still_requires_evidence() -> None:
+def test_policy_publishes_ai_candidate_without_waiting_for_evidence_when_initial_access_path_is_confirmed() -> None:
     result = evaluate_policy_inputs(
         PolicyEvaluationInput(
             cve_id="CVE-2026-0402",
@@ -70,8 +80,8 @@ def test_policy_uses_ai_only_for_allowed_fields_and_still_requires_evidence() ->
         )
     )
 
-    assert result.decision is PolicyDecisionOutcome.DEFER
-    assert result.reason_codes == ("policy.defer.awaiting_exploit_evidence",)
+    assert result.decision is PolicyDecisionOutcome.PUBLISH
+    assert result.reason_codes == ("policy.publish.ai_confirmed_initial_access_path",)
     assert result.ai_fields_considered == (
         "enterprise_relevance_assessment",
         "exploit_path_assessment",
