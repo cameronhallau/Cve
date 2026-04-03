@@ -1,8 +1,8 @@
 # CVE Intelligence Bot Mk2
 
-This repository contains the build and operational documentation base and the Phase 0 service skeleton for the CVE Intelligence Bot Mk2.
+This repository contains the CVE Intelligence Bot Mk2 service, deployment artifacts, and operational documentation.
 
-The current implementation baseline lives in [BUILD.md](/home/cam/Documents/Github/Vuln/Cve/BUILD.md). Supporting artifacts are organized to match the required maintainability set from that baseline:
+The phased build plan still lives in [BUILD.md](/home/cam/Documents/Github/Vuln/Cve/BUILD.md). Supporting artifacts are organized to match the required maintainability set from that plan:
 
 - [architecture/README.md](/home/cam/Documents/Github/Vuln/Cve/architecture/README.md)
 - [adr/README.md](/home/cam/Documents/Github/Vuln/Cve/adr/README.md)
@@ -11,16 +11,30 @@ The current implementation baseline lives in [BUILD.md](/home/cam/Documents/Gith
 - [runbooks/README.md](/home/cam/Documents/Github/Vuln/Cve/runbooks/README.md)
 - [metrics/README.md](/home/cam/Documents/Github/Vuln/Cve/metrics/README.md)
 
-Initial documentation priorities:
+Current documentation priorities:
 
 1. Keep rules-first decisioning explicit.
 2. Preserve PoC and ITW as independent evidence signals.
 3. Make every publish or suppress decision reconstructable.
 4. Fail closed when confidence or evidence quality is insufficient.
 
+## Current Features
+
+- live CVE ingestion from the CVE.org `cvelistV5` delta log
+- deterministic classification with fail-closed severity and product-scope rules
+- pre-publish external enrichment:
+  - EPSS
+  - Exploit-DB
+  - SearchSploit
+  - optional VulnCheck KEV
+  - optional GitHub PoC matching, disabled by default because it is noisier
+- AI-assisted enterprise relevance and exploit-path review for publishable candidates
+- X publication through the worker queue with replayable audit and publication events
+- single-server systemd deployment baseline with API, worker, and timers checked into the repo
+
 ## Local Setup
 
-The current implementation is the Phase 0 foundation on the Python, FastAPI, PostgreSQL, Redis, and RQ stack documented in [adr/0005-phase0-python-fastapi-postgres-rq-stack.md](/home/cam/Documents/Github/Vuln/Cve/adr/0005-phase0-python-fastapi-postgres-rq-stack.md).
+The runtime stack is Python, FastAPI, PostgreSQL, Redis, and RQ as documented in [adr/0005-phase0-python-fastapi-postgres-rq-stack.md](/home/cam/Documents/Github/Vuln/Cve/adr/0005-phase0-python-fastapi-postgres-rq-stack.md).
 
 ### Local Services
 
@@ -31,6 +45,13 @@ Environment defaults live in [.env.example](/home/cam/Documents/Github/Vuln/Cve/
 
 Production deployment defaults live in [.env.production.example](/home/cam/Documents/Github/Vuln/Cve/.env.production.example).
 First-rollout checklist lives in [DEPLOY.md](/home/cam/Documents/Github/Vuln/Cve/DEPLOY.md).
+
+External enrichment defaults:
+
+- `CVE_EXTERNAL_ENRICHMENT_ENABLED=false` locally
+- `CVE_GITHUB_POC_ENABLED=false` by default
+- `VULNCHECK_API_KEY` is optional
+- `SearchSploit` must be installed separately if you want that local signal
 
 ### Publish Target Selection
 
@@ -76,6 +97,7 @@ Start the worker in a separate shell:
 Single-server autonomous production keeps the current queue architecture and uses external scheduling instead of an internal scheduler.
 
 - Continuous process:
+  - `.venv/bin/cve-api`
   - `.venv/bin/cve-worker`
 - Scheduled once-run commands:
   - `.venv/bin/cve-ingest-poll-once`
@@ -92,6 +114,12 @@ Recommended cadence:
 Operational notes:
 
 - `cve-ingest-poll-once` polls the public `cvelistV5` delta log, persists durable source checkpoint state, records success/no-op/failure metrics, and enqueues post-enrichment workflow jobs for newly classified CVEs.
+- each queued post-enrichment run performs external enrichment before AI and policy:
+  - EPSS
+  - Exploit-DB
+  - SearchSploit
+  - optional VulnCheck KEV
+  - optional GitHub PoC matching when explicitly enabled
 - `cve-stale-refresh-once` recomputes stale evidence summaries and enqueues update publications through the existing publish queue when the current policy and publish state permit it.
 - `cve-alert-eval-once` materializes replayable alert state from stored metrics, publication events, and audit trails.
 - Autonomous X publication still depends on the continuous worker being healthy. The scheduled commands enqueue work; they do not replace the worker.
@@ -110,7 +138,7 @@ curl http://127.0.0.1:8000/health/live
 curl http://127.0.0.1:8000/health/ready
 ```
 
-Run the Phase 0 integration gate:
+Run the integration gate:
 
 ```bash
 .venv/bin/pytest -q tests/integration

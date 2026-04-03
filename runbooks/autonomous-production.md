@@ -28,7 +28,7 @@ Use this runbook for single-server autonomous production on X with:
 - pre-publish external enrichment:
   - `CVE_EXTERNAL_ENRICHMENT_ENABLED=true`
   - `CVE_VULNCHECK_KEV_URL`
-  - `VULNCHECK_API_KEY`
+  - optional: `VULNCHECK_API_KEY`
   - `CVE_EPSS_URL`
   - `CVE_GITHUB_POC_ENABLED=false`
   - `CVE_SEARCHSPLOIT_BINARY_PATH`
@@ -84,9 +84,9 @@ Install flow:
 1. Copy `.env.production.example` into `/etc/cve-service/cve.env` and replace placeholder secrets.
 2. Install SearchSploit on Ubuntu-class hosts:
    - `apt-get update`
-   - `apt-get install -y git`
-   - `git clone https://github.com/offensive-security/exploitdb.git /opt/exploitdb || git -C /opt/exploitdb pull --ff-only`
-   - `ln -sf /opt/exploitdb/searchsploit /usr/local/bin/searchsploit`
+   - `apt-get install -y snapd`
+   - `snap install searchsploit`
+   - `hash -r`
    - `searchsploit --help`
 3. Copy the `systemd/*.service` and `systemd/*.timer` files into `/etc/systemd/system/`.
 4. Run `systemctl daemon-reload`.

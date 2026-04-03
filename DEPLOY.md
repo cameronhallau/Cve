@@ -26,7 +26,7 @@ Use this checklist for the first single-server autonomous production rollout on 
   - `CVE_RQ_QUEUE_NAME`
   - `CVE_EXTERNAL_ENRICHMENT_ENABLED=true`
   - `CVE_VULNCHECK_KEV_URL`
-  - `VULNCHECK_API_KEY`
+  - optional: `VULNCHECK_API_KEY`
   - `CVE_EPSS_URL`
   - `CVE_GITHUB_POC_ENABLED=false`
   - `CVE_SEARCHSPLOIT_BINARY_PATH`
@@ -46,13 +46,13 @@ Use this checklist for the first single-server autonomous production rollout on 
 
 ## 2a. Install SearchSploit
 
-Ubuntu-class hosts usually do not provide a `searchsploit` package directly. Install it from the Exploit-DB repo:
+Ubuntu-class hosts usually do not provide a working `searchsploit` package directly. Install it with Snap:
 
 ```bash
 sudo apt-get update
-sudo apt-get install -y git
-sudo git clone https://github.com/offensive-security/exploitdb.git /opt/exploitdb || sudo git -C /opt/exploitdb pull --ff-only
-sudo ln -sf /opt/exploitdb/searchsploit /usr/local/bin/searchsploit
+sudo apt-get install -y snapd
+sudo snap install searchsploit
+hash -r
 searchsploit --help
 ```
 
