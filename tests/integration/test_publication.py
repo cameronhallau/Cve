@@ -7,6 +7,7 @@ from sqlalchemy import select
 from cve_service.core.db import session_scope
 from cve_service.models.entities import AuditEvent, CVE, PolicyDecision, PublicationEvent
 from cve_service.models.enums import CveState, EvidenceSignal, EvidenceStatus, PublicationEventStatus
+from cve_service.services.description_compression import DescriptionCompressionResult
 from cve_service.services.enrichment import EvidenceInput, record_evidence
 from cve_service.services.ingestion import PublicFeedRecord, ingest_public_feed_record
 from cve_service.services.post_enrichment import process_post_enrichment_workflow
@@ -17,6 +18,22 @@ from cve_service.services.publish_targets import ConsolePublishTarget, InMemoryP
 class NeverCalledProvider:
     def review(self, request):  # pragma: no cover - deterministic candidate never routes to AI
         raise AssertionError("AI should not be called for deterministic candidates")
+
+
+class ScriptedDescriptionCompressor:
+    def __init__(self, *outputs: str) -> None:
+        self.outputs = list(outputs)
+        self.calls = 0
+
+    def compress(self, request) -> DescriptionCompressionResult:
+        self.calls += 1
+        text = self.outputs[min(self.calls - 1, len(self.outputs) - 1)]
+        return DescriptionCompressionResult(
+            compressed_description=text,
+            source="llm",
+            model_name="mock-compressor",
+            prompt_version="phase8-description-compression.v1",
+        )
 
 
 def test_publish_service_moves_publish_pending_candidate_to_published_with_replay_snapshot(session_factory) -> None:
@@ -107,6 +124,40 @@ def test_publish_service_retries_failed_attempts_without_duplicate_events(sessio
     assert events[0].payload_snapshot["attempts"][0]["outcome"] == "FAILED"
     assert events[0].payload_snapshot["attempts"][1]["outcome"] == "PUBLISHED"
     assert len(target.published_requests) == 1
+
+
+def test_publish_service_reuses_stored_description_brief_across_retries(session_factory) -> None:
+    with session_scope(session_factory) as session:
+        _prepare_publish_pending_cve(session, "CVE-2026-0805")
+
+        target = InMemoryPublishTarget(name="retry-memory-desc", failures_before_success=1)
+        compressor = ScriptedDescriptionCompressor(
+            "In Exchange Server, an unauth attacker can trigger RCE.",
+            "In Exchange Server, this should not replace the stored brief.",
+        )
+
+        first = publish_initial_publication(
+            session,
+            "CVE-2026-0805",
+            target,
+            description_compressor=compressor,
+        )
+        second = publish_initial_publication(
+            session,
+            "CVE-2026-0805",
+            target,
+            description_compressor=compressor,
+        )
+        events = session.scalars(select(PublicationEvent)).all()
+
+    assert first.published is False
+    assert second.published is True
+    assert second.reused_event is True
+    assert compressor.calls == 1
+    assert len(events) == 1
+    assert events[0].payload_snapshot["replay_context"]["description_compression"]["description_brief"] == (
+        "In Exchange Server, an unauth attacker can trigger RCE."
+    )
 
 
 def test_publish_target_abstraction_is_swappable_without_changing_core_outcome(session_factory) -> None:

@@ -292,18 +292,27 @@ def _build_sections(request: PublishRequest) -> list[str]:
         return sections
 
     description = ((replay_context.get("cve") or {}).get("description")) or "No description provided."
+    classification = replay_context.get("classification") or {}
+    classification_details = classification.get("details") or {}
+    description_compression = replay_context.get("description_compression") or {}
+    description_brief = description_compression.get("description_brief") or description
+    product = (
+        metadata.get("canonical_name")
+        or classification.get("canonical_name")
+        or classification_details.get("canonical_name")
+        or "unknown-product"
+    )
     return [
-        request.content.title,
-        f"Summary: {request.content.summary}",
-        f"Severity: {metadata.get('severity') or 'UNKNOWN'}",
-        f"Product: {metadata.get('canonical_name') or 'unknown-product'}",
-        f"Scope: {metadata.get('product_scope') or 'unknown'}",
-        f"Evidence: PoC={metadata.get('poc_status') or 'UNKNOWN'} ITW={metadata.get('itw_status') or 'UNKNOWN'}",
-        "Reasons: "
-        + ", ".join(str(reason) for reason in metadata.get("policy_reason_codes") or ())
-        if metadata.get("policy_reason_codes")
-        else "Reasons: none",
-        f"Description: {description}",
+        f"{request.cve_id}\n",
+        f"{description_brief}\n",
+        "\n".join(
+            (
+                f"Severity: {_format_initial_severity(metadata.get('severity'))}",
+                f"PoC: {_format_initial_evidence_status(metadata.get('poc_status'))}",
+                f"Exploited: {_format_initial_evidence_status(metadata.get('itw_status'))}",
+                f"Product: {product}",
+            )
+        ),
     ]
 
 
@@ -419,7 +428,13 @@ def _truncate_to_fit(text: str, limit: int, *, trailer: str = "") -> str:
 
 
 def _normalize_section(text: str) -> str:
-    return " ".join(str(text).split())
+    raw_text = str(text)
+    trailing_newline = raw_text.endswith("\n")
+    normalized_lines = [" ".join(line.split()) for line in raw_text.splitlines()]
+    normalized = "\n".join(normalized_lines).strip()
+    if trailing_newline and normalized:
+        return normalized + "\n"
+    return normalized
 
 
 def _weighted_length(text: str) -> int:
@@ -444,6 +459,18 @@ def _format_confidence(value: Any) -> str:
     if isinstance(value, (int, float)):
         return f"{float(value):.2f}"
     return str(value)
+
+
+def _format_initial_severity(value: Any) -> str:
+    if not isinstance(value, str) or not value:
+        return "Unknown"
+    return value.strip().lower().capitalize()
+
+
+def _format_initial_evidence_status(value: Any) -> str:
+    if isinstance(value, str) and value.upper() == "PRESENT":
+        return "yes"
+    return "n/a"
 
 
 def _humanize_change_field(field_name: Any) -> str:

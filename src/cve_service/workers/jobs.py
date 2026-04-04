@@ -11,6 +11,7 @@ from cve_service.core.config import get_settings
 from cve_service.core.db import create_session_factory, session_scope
 from cve_service.services.ai_provider import build_ai_review_provider
 from cve_service.services.alerting import evaluate_operational_alerts
+from cve_service.services.description_compression import build_description_compressor
 from cve_service.services.enrichment import refresh_stale_evidence
 from cve_service.services.external_enrichment import run_external_enrichment_checks
 from cve_service.services.post_enrichment import process_post_enrichment_workflow
@@ -217,11 +218,13 @@ def process_publication_job(
                 target_name=publish_target_name,
                 behavior=publish_target_behavior,
             )
+            description_compressor = build_description_compressor(settings) if target.name == "x" else None
             result = publish_publication(
                 session,
                 cve_id,
                 target,
                 attempted_at=_coerce_datetime(attempted_at),
+                description_compressor=description_compressor,
             )
         return {
             "status": "processed" if result.published or result.duplicate_blocked else "failed",

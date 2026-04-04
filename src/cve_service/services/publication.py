@@ -26,6 +26,11 @@ from cve_service.models.enums import (
     PublicationEventType,
 )
 from cve_service.services.ai_review import fingerprint_payload
+from cve_service.services.description_compression import (
+    DescriptionCompressor,
+    DescriptionCompressionRequest,
+    fallback_description_brief,
+)
 from cve_service.services.operational_metrics import increment_operational_metric
 from cve_service.services.publish_content import (
     PublishContent,
@@ -90,11 +95,17 @@ def prepare_publication(
     cve_id: str,
     *,
     target_name: str,
+    description_compressor: DescriptionCompressor | None = None,
 ) -> PreparedPublication:
     cve = _get_cve_by_public_id(session, cve_id)
     if cve.state is CveState.UPDATE_PENDING:
         return prepare_update_publication(session, cve_id, target_name=target_name)
-    return prepare_initial_publication(session, cve_id, target_name=target_name)
+    return prepare_initial_publication(
+        session,
+        cve_id,
+        target_name=target_name,
+        description_compressor=description_compressor,
+    )
 
 
 def prepare_initial_publication(
@@ -102,6 +113,7 @@ def prepare_initial_publication(
     cve_id: str,
     *,
     target_name: str,
+    description_compressor: DescriptionCompressor | None = None,
 ) -> PreparedInitialPublication:
     cve = _get_cve_by_public_id(session, cve_id)
     classification = _get_latest_classification(session, cve.id)
@@ -118,6 +130,13 @@ def prepare_initial_publication(
 
     ai_review = _get_latest_ai_review(session, cve.id)
     policy_snapshot = decision.policy_snapshot
+    description_brief_metadata = _resolve_initial_description_brief_metadata(
+        session,
+        cve=cve,
+        classification=classification,
+        target_name=target_name,
+        description_compressor=description_compressor,
+    )
     content = build_initial_publish_content(
         cve=cve,
         classification=classification,
@@ -154,6 +173,7 @@ def prepare_initial_publication(
             content=content,
             content_hash=content_hash,
             idempotency_key=idempotency_key,
+            description_brief_metadata=description_brief_metadata,
         ),
     )
 
@@ -232,8 +252,14 @@ def publish_publication(
     *,
     attempted_at: datetime | None = None,
     actor_type: AuditActorType = AuditActorType.WORKER,
+    description_compressor: DescriptionCompressor | None = None,
 ) -> PublicationResult:
-    prepared = prepare_publication(session, cve_id, target_name=target.name)
+    prepared = prepare_publication(
+        session,
+        cve_id,
+        target_name=target.name,
+        description_compressor=description_compressor,
+    )
     return _publish_prepared(
         session,
         prepared,
@@ -250,8 +276,14 @@ def publish_initial_publication(
     *,
     attempted_at: datetime | None = None,
     actor_type: AuditActorType = AuditActorType.WORKER,
+    description_compressor: DescriptionCompressor | None = None,
 ) -> PublicationResult:
-    prepared = prepare_initial_publication(session, cve_id, target_name=target.name)
+    prepared = prepare_initial_publication(
+        session,
+        cve_id,
+        target_name=target.name,
+        description_compressor=description_compressor,
+    )
     return _publish_prepared(
         session,
         prepared,
@@ -753,6 +785,7 @@ def _build_initial_publication_payload_snapshot(
     content: PublishContent,
     content_hash: str,
     idempotency_key: str,
+    description_brief_metadata: dict[str, Any],
 ) -> dict[str, Any]:
     return {
         "schema_version": PUBLICATION_EVENT_SCHEMA_VERSION,
@@ -776,9 +809,74 @@ def _build_initial_publication_payload_snapshot(
             "policy_decision": _serialize_policy_decision(decision),
             "policy_configuration": _serialize_policy_configuration(policy_snapshot, decision),
             "ai_review": _serialize_ai_review(ai_review),
+            "description_compression": {
+                "description_brief": description_brief_metadata.get("description_brief"),
+                "source": description_brief_metadata.get("description_brief_source"),
+                "model_name": description_brief_metadata.get("description_brief_model_name"),
+                "prompt_version": description_brief_metadata.get("description_brief_prompt_version"),
+            },
         },
         "content_hash": content_hash,
         "attempts": [],
+    }
+
+
+def _resolve_initial_description_brief_metadata(
+    session: Session,
+    *,
+    cve: CVE,
+    classification: Classification,
+    target_name: str,
+    description_compressor: DescriptionCompressor | None,
+) -> dict[str, Any]:
+    existing_metadata = _get_existing_initial_publish_metadata(session, cve.id, target_name=target_name)
+    if existing_metadata.get("description_brief"):
+        return {
+            "description_brief": existing_metadata.get("description_brief"),
+            "description_brief_source": existing_metadata.get("description_brief_source"),
+            "description_brief_model_name": existing_metadata.get("description_brief_model_name"),
+            "description_brief_prompt_version": existing_metadata.get("description_brief_prompt_version"),
+        }
+
+    if description_compressor is None:
+        return {
+            "description_brief": fallback_description_brief(
+                cve.description,
+                canonical_product_name=classification.details.get("canonical_product_name"),
+            ),
+            "description_brief_source": "fallback",
+            "description_brief_model_name": None,
+            "description_brief_prompt_version": None,
+        }
+
+    try:
+        result = description_compressor.compress(
+            DescriptionCompressionRequest(
+                cve_id=cve.cve_id,
+                title=cve.title,
+                description=cve.description,
+                severity=cve.severity,
+                canonical_name=classification.details.get("canonical_name"),
+                canonical_vendor_name=classification.details.get("canonical_vendor_name"),
+                canonical_product_name=classification.details.get("canonical_product_name"),
+            )
+        )
+    except Exception:
+        return {
+            "description_brief": fallback_description_brief(
+                cve.description,
+                canonical_product_name=classification.details.get("canonical_product_name"),
+            ),
+            "description_brief_source": "fallback",
+            "description_brief_model_name": None,
+            "description_brief_prompt_version": None,
+        }
+
+    return {
+        "description_brief": result.compressed_description,
+        "description_brief_source": result.source,
+        "description_brief_model_name": result.model_name,
+        "description_brief_prompt_version": result.prompt_version,
     }
 
 
@@ -945,6 +1043,25 @@ def _get_publication_event_by_id(session: Session, event_id: UUID | None) -> Pub
     if event_id is None:
         return None
     return session.scalar(select(PublicationEvent).where(PublicationEvent.id == event_id).limit(1))
+
+
+def _get_existing_initial_publish_metadata(session: Session, cve_pk: UUID, *, target_name: str) -> dict[str, Any]:
+    event = session.scalar(
+        select(PublicationEvent)
+        .where(
+            PublicationEvent.cve_id == cve_pk,
+            PublicationEvent.event_type == PublicationEventType.INITIAL,
+            PublicationEvent.destination == target_name,
+        )
+        .order_by(PublicationEvent.created_at.desc(), PublicationEvent.id.desc())
+        .limit(1)
+    )
+    if event is None:
+        return {}
+    payload_snapshot = event.payload_snapshot or {}
+    publish_content = payload_snapshot.get("publish_content") or {}
+    metadata = publish_content.get("metadata") or {}
+    return dict(metadata) if isinstance(metadata, dict) else {}
 
 
 def _get_publication_event_by_idempotency(session: Session, idempotency_key: str) -> PublicationEvent | None:

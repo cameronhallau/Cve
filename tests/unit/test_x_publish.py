@@ -12,7 +12,10 @@ from cve_service.services.x_publish import XPublishTarget, build_x_thread_plan
 
 
 def test_build_x_thread_plan_splits_long_initial_payload_into_bounded_posts() -> None:
-    request = _initial_request(description="Remote code execution " * 80)
+    request = _initial_request(
+        description="Remote code execution " * 80,
+        description_brief="Remote code execution " * 80,
+    )
 
     posts = build_x_thread_plan(request)
 
@@ -21,6 +24,29 @@ def test_build_x_thread_plan_splits_long_initial_payload_into_bounded_posts() ->
     assert posts[0].text.endswith(f"1/{len(posts)}")
     assert posts[-1].text.endswith(f"{len(posts)}/{len(posts)}")
     assert posts[0].reply_to_post_id is None
+
+
+def test_build_x_thread_plan_formats_initial_payload_deterministically() -> None:
+    request = _initial_request(
+        description="A flaw was found in Keycloak. An unauthenticated attacker can trigger denial of service.",
+        description_brief=(
+            "In Keycloak, an unauth attacker can send a crafted POST request to the OIDC token endpoint, resulting in DoS."
+        ),
+    )
+
+    posts = build_x_thread_plan(request)
+    combined = "\n".join(post.text for post in posts)
+
+    assert combined.startswith("CVE-2026-6100")
+    assert "CVE-2026-6100\n\nIn Keycloak" in combined
+    assert "DoS.\n\nSeverity: Critical" in combined
+    assert "Severity: Critical" in combined
+    assert "PoC: n/a" in combined
+    assert "Exploited: n/a" in combined
+    assert "Product: Microsoft Exchange Server" in combined
+    assert "Summary:" not in combined
+    assert "Reasons:" not in combined
+    assert "Scope:" not in combined
 
 
 def test_x_publish_target_posts_update_threads_as_replies() -> None:
@@ -141,7 +167,11 @@ def test_x_publish_target_requires_baseline_external_id_for_updates() -> None:
     assert error.retry_blocked is True
 
 
-def _initial_request(*, description: str = "Enterprise Exchange Server RCE with exploit evidence.") -> PublishRequest:
+def _initial_request(
+    *,
+    description: str = "Enterprise Exchange Server RCE with exploit evidence.",
+    description_brief: str = "In Microsoft Exchange Server, an unauth attacker can trigger RCE.",
+) -> PublishRequest:
     return PublishRequest(
         cve_id="CVE-2026-6100",
         event_type="INITIAL",
@@ -159,7 +189,11 @@ def _initial_request(*, description: str = "Enterprise Exchange Server RCE with 
                 "severity": "CRITICAL",
                 "canonical_name": "Microsoft Exchange Server",
                 "product_scope": "enterprise",
-                "poc_status": "PRESENT",
+                "affected_products": ["Microsoft Exchange Server"],
+                "description_brief": description_brief,
+                "description_brief_source": "llm",
+                "description_brief_model_name": "x-ai/grok-4.1-fast",
+                "poc_status": "UNKNOWN",
                 "itw_status": "UNKNOWN",
                 "policy_reason_codes": ["policy.publish.enterprise_candidate_with_poc"],
             },
@@ -168,7 +202,13 @@ def _initial_request(*, description: str = "Enterprise Exchange Server RCE with 
             "replay_context": {
                 "cve": {
                     "description": description,
-                }
+                },
+                "description_compression": {
+                    "description_brief": description_brief,
+                    "source": "llm",
+                    "model_name": "x-ai/grok-4.1-fast",
+                    "prompt_version": "phase8-description-compression.v1",
+                },
             }
         },
     )

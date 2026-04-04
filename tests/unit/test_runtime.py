@@ -47,10 +47,11 @@ def test_handle_ingest_poll_once_calls_live_poll_service(monkeypatch) -> None:
     monkeypatch.setattr("cve_service.runtime.ping_queue", lambda redis_client, queue: (True, "connected"))
     monkeypatch.setattr(
         "cve_service.runtime.RQPostEnrichmentJobProducer",
-        lambda queue, database_url=None, ai_model_name=None: {
+        lambda queue, database_url=None, ai_model_name=None, publish_target_name=None: {
             "queue": queue,
             "database_url": database_url,
             "ai_model_name": ai_model_name,
+            "publish_target_name": publish_target_name,
         },
     )
 
@@ -89,6 +90,7 @@ def test_handle_ingest_poll_once_calls_live_poll_service(monkeypatch) -> None:
         cve_org_http_timeout_seconds=20.0,
         database_url="postgresql://example.test/cve",
         ai_model="deepseek/deepseek-v3.2",
+        publish_target_name="x",
     )
 
     exit_code = _handle_ingest_poll_once(settings, argparse.Namespace(polled_at="2026-04-02T14:00:00+00:00"))
@@ -98,6 +100,7 @@ def test_handle_ingest_poll_once_calls_live_poll_service(monkeypatch) -> None:
     assert captured["kwargs"]["polled_at"] == datetime(2026, 4, 2, 14, 0, tzinfo=UTC)
     assert captured["kwargs"]["post_enrichment_producer"]["queue"] == "queue"
     assert captured["kwargs"]["post_enrichment_producer"]["database_url"] == "postgresql://example.test/cve"
+    assert captured["kwargs"]["post_enrichment_producer"]["publish_target_name"] == "x"
     assert engine.disposed is True
     assert redis_client.closed is True
 

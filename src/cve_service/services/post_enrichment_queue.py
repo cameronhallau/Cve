@@ -39,6 +39,7 @@ class RQPostEnrichmentJobProducer:
     database_url: str | None = None
     ai_payload: dict[str, Any] | str | None = None
     ai_model_name: str | None = None
+    publish_target_name: str | None = None
 
     def schedule(
         self,
@@ -125,6 +126,7 @@ class RQPostEnrichmentJobProducer:
                 database_url=self.database_url,
                 ai_payload=self.ai_payload,
                 ai_model_name=self.ai_model_name,
+                publish_target_name=self.publish_target_name,
             )
 
             def enqueue_job() -> None:
@@ -150,6 +152,7 @@ def _build_enqueue_kwargs(
     database_url: str | None,
     ai_payload: dict[str, Any] | str | None,
     ai_model_name: str | None,
+    publish_target_name: str | None,
 ) -> dict[str, Any]:
     kwargs: dict[str, Any] = {
         "retry_ai_review": retry_ai_review,
@@ -164,6 +167,8 @@ def _build_enqueue_kwargs(
         kwargs["ai_payload"] = ai_payload
     if ai_model_name is not None:
         kwargs["ai_model_name"] = ai_model_name
+    if publish_target_name is not None:
+        kwargs["publish_target_name"] = publish_target_name
     return kwargs
 
 

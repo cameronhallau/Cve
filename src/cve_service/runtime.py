@@ -105,6 +105,7 @@ def _handle_ingest_poll_once(settings: Settings, args: argparse.Namespace) -> in
                     queue,
                     database_url=settings.database_url,
                     ai_model_name=settings.ai_model,
+                    publish_target_name=settings.publish_target_name,
                 ),
             )
         stream = sys.stderr if result.status == "failed" else sys.stdout
