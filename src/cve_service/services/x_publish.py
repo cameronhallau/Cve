@@ -17,9 +17,6 @@ from cve_service.core.config import Settings
 from cve_service.services.publish_targets import PublishRequest, PublishResponse, PublishTargetError
 
 X_CREATE_POST_PATH = "/2/tweets"
-X_MAX_WEIGHTED_LENGTH = 280
-X_MAX_THREAD_POSTS = 4
-_X_POST_INDEX_RESERVE = len(f"\n\n{X_MAX_THREAD_POSTS}/{X_MAX_THREAD_POSTS}")
 
 
 class XAuthStrategy(Protocol):
@@ -251,12 +248,8 @@ class XPublishTarget:
 
 def build_x_thread_plan(request: PublishRequest) -> list[XThreadPost]:
     sections = _build_sections(request)
-    posts = _pack_sections(sections)
     reply_to_post_id = _extract_initial_reply_to_post_id(request)
-    return [
-        XThreadPost(text=post, reply_to_post_id=reply_to_post_id if index == 0 else None)
-        for index, post in enumerate(posts)
-    ]
+    return [XThreadPost(text=_join_sections(sections), reply_to_post_id=reply_to_post_id)]
 
 
 def _build_sections(request: PublishRequest) -> list[str]:
@@ -303,8 +296,8 @@ def _build_sections(request: PublishRequest) -> list[str]:
         or "unknown-product"
     )
     return [
-        f"{request.cve_id}\n",
-        f"{description_brief}\n",
+        request.cve_id,
+        description_brief,
         "\n".join(
             (
                 f"Severity: {_format_initial_severity(metadata.get('severity'))}",
@@ -338,93 +331,12 @@ def _extract_initial_reply_to_post_id(request: PublishRequest) -> str | None:
     )
 
 
-def _pack_sections(sections: list[str]) -> list[str]:
-    limit = X_MAX_WEIGHTED_LENGTH - _X_POST_INDEX_RESERVE
-    flattened_sections: list[str] = []
-    for section in sections:
-        normalized = _normalize_section(section)
-        if not normalized:
-            continue
-        flattened_sections.extend(_split_section(normalized, limit))
-    if not flattened_sections:
-        return ["CVE publication payload was empty"]
-
-    posts: list[str] = []
-    current = ""
-    for section in flattened_sections:
-        candidate = section if not current else f"{current}\n{section}"
-        if _weighted_length(candidate) <= limit:
-            current = candidate
-            continue
-        if current:
-            posts.append(current)
-        current = section
-    if current:
-        posts.append(current)
-
-    if len(posts) > X_MAX_THREAD_POSTS:
-        posts = posts[: X_MAX_THREAD_POSTS - 1] + [
-            _truncate_to_fit("\n".join(posts[X_MAX_THREAD_POSTS - 1 :]), limit, trailer=" [truncated]")
-        ]
-
-    if len(posts) == 1:
-        return [_truncate_to_fit(posts[0], X_MAX_WEIGHTED_LENGTH)]
-
-    numbered_posts: list[str] = []
-    total = len(posts)
-    for index, post in enumerate(posts, start=1):
-        suffix = f"\n\n{index}/{total}"
-        numbered_posts.append(_truncate_to_fit(post, X_MAX_WEIGHTED_LENGTH - _weighted_length(suffix)) + suffix)
-    return numbered_posts
-
-
-def _split_section(text: str, limit: int) -> list[str]:
-    words = text.split(" ")
-    chunks: list[str] = []
-    current = ""
-    for word in words:
-        candidate = word if not current else f"{current} {word}"
-        if _weighted_length(candidate) <= limit:
-            current = candidate
-            continue
-        if current:
-            chunks.append(current)
-        if _weighted_length(word) <= limit:
-            current = word
-            continue
-        chunks.extend(_split_long_token(word, limit))
-        current = ""
-    if current:
-        chunks.append(current)
-    return chunks
-
-
-def _split_long_token(token: str, limit: int) -> list[str]:
-    chunks: list[str] = []
-    current = ""
-    for character in token:
-        candidate = current + character
-        if _weighted_length(candidate) <= limit:
-            current = candidate
-            continue
-        if current:
-            chunks.append(current)
-        current = character
-    if current:
-        chunks.append(current)
-    return chunks
-
-
-def _truncate_to_fit(text: str, limit: int, *, trailer: str = "") -> str:
-    if _weighted_length(text) <= limit:
-        return text
-    truncated = ""
-    for character in text:
-        candidate = truncated + character
-        if _weighted_length(candidate + trailer) > limit:
-            break
-        truncated = candidate
-    return (truncated.rstrip() + trailer).rstrip()
+def _join_sections(sections: list[str]) -> str:
+    normalized_sections = [_normalize_section(section) for section in sections]
+    normalized_sections = [section for section in normalized_sections if section]
+    if not normalized_sections:
+        return "CVE publication payload was empty"
+    return "\n\n".join(normalized_sections)
 
 
 def _normalize_section(text: str) -> str:
@@ -435,13 +347,6 @@ def _normalize_section(text: str) -> str:
     if trailing_newline and normalized:
         return normalized + "\n"
     return normalized
-
-
-def _weighted_length(text: str) -> int:
-    total = 0
-    for character in text:
-        total += 1 if ord(character) <= 0x7F else 2
-    return total
 
 
 def _format_signal_summary(payload: dict[str, Any]) -> str:

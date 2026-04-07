@@ -11,7 +11,7 @@ from cve_service.services.publish_targets import PublishRequest, PublishTargetEr
 from cve_service.services.x_publish import XPublishTarget, build_x_thread_plan
 
 
-def test_build_x_thread_plan_splits_long_initial_payload_into_bounded_posts() -> None:
+def test_build_x_thread_plan_keeps_long_initial_payload_in_single_post() -> None:
     request = _initial_request(
         description="Remote code execution " * 80,
         description_brief="Remote code execution " * 80,
@@ -19,10 +19,8 @@ def test_build_x_thread_plan_splits_long_initial_payload_into_bounded_posts() ->
 
     posts = build_x_thread_plan(request)
 
-    assert len(posts) >= 2
-    assert all(len(post.text) <= 280 for post in posts)
-    assert posts[0].text.endswith(f"1/{len(posts)}")
-    assert posts[-1].text.endswith(f"{len(posts)}/{len(posts)}")
+    assert len(posts) == 1
+    assert posts[0].text.count("Remote code execution") >= 80
     assert posts[0].reply_to_post_id is None
 
 
@@ -51,7 +49,7 @@ def test_build_x_thread_plan_formats_initial_payload_deterministically() -> None
 
 def test_x_publish_target_posts_update_threads_as_replies() -> None:
     captured_requests: list[dict[str, object]] = []
-    response_ids = ["x-post-100", "x-post-101", "x-post-102"]
+    response_ids = ["x-post-100"]
 
     def handler(request: httpx.Request) -> httpx.Response:
         payload = json.loads(request.content.decode("utf-8"))
@@ -69,9 +67,8 @@ def test_x_publish_target_posts_update_threads_as_replies() -> None:
 
     assert response.external_id == "x-post-100"
     assert response.response_payload["post_ids"][0] == "x-post-100"
-    assert len(captured_requests) >= 2
+    assert len(captured_requests) == 1
     assert captured_requests[0]["reply"] == {"in_reply_to_tweet_id": "x-root-42"}
-    assert captured_requests[1]["reply"] == {"in_reply_to_tweet_id": "x-post-100"}
 
 
 def test_x_publish_target_maps_rate_limit_failures_as_retryable() -> None:
