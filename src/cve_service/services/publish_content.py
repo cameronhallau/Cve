@@ -40,7 +40,8 @@ def build_initial_publish_content(
 ) -> PublishContent:
     canonical_name = classification.details.get("canonical_name")
     product_scope = classification.details.get("product_scope")
-    evidence_label = _derive_evidence_label(cve.poc_status, cve.itw_status)
+    effective_poc_status = _effective_poc_status(cve.poc_status, reference_links)
+    evidence_label = _derive_evidence_label(effective_poc_status, cve.itw_status)
     external_enrichment = getattr(cve, "external_enrichment", {}) or {}
     title = f"{cve.cve_id}: {cve.title or 'Untitled vulnerability'}"
     summary = " | ".join(
@@ -60,7 +61,7 @@ def build_initial_publish_content(
         f"Policy Decision: {decision.decision.value}",
         f"Policy Reasons: {', '.join(decision.reason_codes) if decision.reason_codes else 'none'}",
         (
-            f"Exploit Evidence: PoC={cve.poc_status.value} ({_format_confidence(cve.poc_confidence)}), "
+            f"Exploit Evidence: PoC={effective_poc_status.value} ({_format_confidence(cve.poc_confidence)}), "
             f"ITW={cve.itw_status.value} ({_format_confidence(cve.itw_confidence)})"
         ),
         *(
@@ -87,7 +88,7 @@ def build_initial_publish_content(
         "severity": cve.severity,
         "canonical_name": canonical_name,
         "product_scope": product_scope,
-        "poc_status": cve.poc_status.value,
+        "poc_status": effective_poc_status.value,
         "poc_confidence": cve.poc_confidence,
         "itw_status": cve.itw_status.value,
         "itw_confidence": cve.itw_confidence,
@@ -204,6 +205,33 @@ def _derive_evidence_label(poc_status: EvidenceStatus, itw_status: EvidenceStatu
     if itw_status is EvidenceStatus.ABSENT and poc_status is EvidenceStatus.ABSENT:
         return "none"
     return "unknown"
+
+
+def _effective_poc_status(
+    poc_status: EvidenceStatus,
+    reference_links: dict[str, Any] | None,
+) -> EvidenceStatus:
+    if _has_reference_link(reference_links, "poc"):
+        return EvidenceStatus.PRESENT
+    return poc_status
+
+
+def _has_reference_link(reference_links: dict[str, Any] | None, category: str) -> bool:
+    if not isinstance(reference_links, dict):
+        return False
+
+    values = reference_links.get(category)
+    if not isinstance(values, list):
+        return False
+
+    for item in values:
+        if isinstance(item, dict):
+            url = item.get("url")
+        else:
+            url = item
+        if isinstance(url, str) and url:
+            return True
+    return False
 
 
 def _format_confidence(value: float | None) -> str:

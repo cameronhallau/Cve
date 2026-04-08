@@ -88,6 +88,54 @@ def test_build_initial_publish_content_is_canonical_and_replayable() -> None:
     assert content.as_payload()["labels"][0] == "severity:critical"
 
 
+def test_build_initial_publish_content_promotes_poc_status_when_cve_org_poc_link_exists() -> None:
+    cve = CVE(
+        id=uuid4(),
+        cve_id="CVE-2026-0704",
+        title="Exchange Server RCE",
+        description="Remote code execution in Exchange Server.",
+        severity="CRITICAL",
+        state=CveState.PUBLISH_PENDING,
+        poc_status=EvidenceStatus.ABSENT,
+        poc_confidence=0.12,
+        itw_status=EvidenceStatus.UNKNOWN,
+        itw_confidence=None,
+    )
+    classification = Classification(
+        id=uuid4(),
+        cve_id=cve.id,
+        classifier_version="phase1-classifier.v1",
+        outcome=ClassificationOutcome.CANDIDATE,
+        reason_codes=["classifier.candidate.enterprise_high_or_critical"],
+        details={
+            "canonical_name": "microsoft:exchange_server",
+            "product_scope": "enterprise",
+        },
+    )
+    decision = PolicyDecision(
+        id=uuid4(),
+        cve_id=cve.id,
+        policy_version="phase3-policy.v1",
+        input_fingerprint="policy-fingerprint",
+        decision=PolicyDecisionOutcome.PUBLISH,
+        deterministic_outcome=ClassificationOutcome.CANDIDATE,
+        reason_codes=["policy.publish.enterprise_candidate_with_poc"],
+        inputs_snapshot={"fixture": True},
+    )
+
+    content = build_initial_publish_content(
+        cve=cve,
+        classification=classification,
+        decision=decision,
+        ai_review=None,
+        reference_links={"poc": [{"url": "https://github.com/example/repo/blob/main/poc.py"}]},
+    )
+
+    assert content.summary == "CRITICAL | microsoft:exchange_server | poc"
+    assert "Exploit Evidence: PoC=PRESENT (0.12), ITW=UNKNOWN (n/a)" in content.body
+    assert content.metadata["poc_status"] == "PRESENT"
+
+
 def test_build_update_publish_content_uses_stored_material_change_snapshot() -> None:
     candidate = UpdateCandidate(
         id=uuid4(),
@@ -310,7 +358,7 @@ def test_prepare_initial_publication_carries_cve_org_reference_links(session_fac
             EvidenceInput(
                 cve_id="CVE-2026-0703",
                 signal_type=EvidenceSignal.POC,
-                status=EvidenceStatus.PRESENT,
+                status=EvidenceStatus.ABSENT,
                 source_name="trusted-poc-db",
                 source_record_id="poc-2026-0703",
                 collected_at=datetime(2026, 4, 2, 22, 5, tzinfo=UTC),
@@ -326,10 +374,12 @@ def test_prepare_initial_publication_carries_cve_org_reference_links(session_fac
     assert prepared.content.metadata["reference_links"]["vendor"][0]["url"] == "https://vendor.example/advisory"
     assert prepared.content.metadata["reference_links"]["research"][0]["url"] == "https://research.example/write-up"
     assert prepared.content.metadata["reference_links"]["poc"][0]["url"] == "https://github.com/example/repo/blob/main/poc.py"
+    assert prepared.content.metadata["poc_status"] == "PRESENT"
     assert (
         prepared.payload_snapshot["replay_context"]["source_references"]["links"]["vendor"][0]["url"]
         == "https://vendor.example/advisory"
     )
+    assert prepared.payload_snapshot["replay_context"]["x_post"]["public_poc"] == "Yes"
     assert prepared.payload_snapshot["replay_context"]["x_post"]["patch_available"] == "Yes"
     assert prepared.payload_snapshot["replay_context"]["x_post"]["affected_product"] == "Microsoft Exchange Server"
     assert prepared.payload_snapshot["replay_context"]["x_post"]["affected_version"] == ">= 2019 CU14 and < 2019 CU15"

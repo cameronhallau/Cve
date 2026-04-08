@@ -938,6 +938,9 @@ def _build_initial_x_post_context(
     raw_payload = snapshot.raw_payload if snapshot is not None else {}
     canonical_vendor_name = classification.details.get("canonical_vendor_name")
     canonical_product_name = classification.details.get("canonical_product_name")
+    public_poc = (
+        "Yes" if _reference_category_has_urls(reference_links, "poc") else _render_initial_binary_status(cve.poc_status.value)
+    )
     affected_product = _extract_x_affected_product(
         raw_payload,
         canonical_vendor_name=canonical_vendor_name,
@@ -949,7 +952,7 @@ def _build_initial_x_post_context(
         "description": description_brief_metadata.get("description_brief") or "No description provided.",
         "severity": _humanize_severity(cve.severity),
         "exploitation": _render_initial_exploitation_status(cve.itw_status.value),
-        "public_poc": _render_initial_binary_status(cve.poc_status.value),
+        "public_poc": public_poc,
         "patch_available": _extract_patch_availability(raw_payload, reference_links=reference_links),
         "affected_product": affected_product or "Unknown",
         "affected_version": _extract_x_affected_version(
@@ -959,6 +962,21 @@ def _build_initial_x_post_context(
         or "Unknown",
         "mitigations": _extract_source_backed_mitigations(raw_payload),
     }
+
+
+def _reference_category_has_urls(reference_links: dict[str, Any], category: str) -> bool:
+    values = reference_links.get(category)
+    if not isinstance(values, list):
+        return False
+
+    for item in values:
+        if isinstance(item, dict):
+            url = item.get("url")
+        else:
+            url = item
+        if isinstance(url, str) and url:
+            return True
+    return False
 
 
 def _derive_vulnerability_type(title: str | None, description: str | None) -> str:

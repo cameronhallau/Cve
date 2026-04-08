@@ -93,6 +93,21 @@ def test_build_x_thread_plan_includes_labeled_reference_links_only_when_present(
     assert "ITW:" not in text
 
 
+def test_build_x_thread_plan_prefers_poc_link_backed_status_over_unknown_polling_state() -> None:
+    request = _initial_request(
+        reference_links={
+            "poc": [{"url": "https://github.com/example/repo/blob/main/poc.py"}],
+        },
+        public_poc="Yes",
+    )
+
+    posts = build_x_thread_plan(request)
+    text = posts[0].text
+
+    assert "Public PoC: Yes" in text
+    assert "PoC: n/a" not in text
+
+
 def test_build_x_thread_plan_omits_mitigations_section_when_no_source_backed_mitigations_exist() -> None:
     request = _initial_request()
 
