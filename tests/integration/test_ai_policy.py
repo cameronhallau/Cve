@@ -5,11 +5,21 @@ from datetime import UTC, datetime
 from sqlalchemy import select
 
 from cve_service.core.db import session_scope
-from cve_service.models.entities import AIReview, AuditEvent, CVE, PolicyDecision
-from cve_service.models.enums import AIReviewOutcome, ClassificationOutcome, CveState, EvidenceSignal, EvidenceStatus, PolicyDecisionOutcome
+from cve_service.models.entities import AIReview, AuditEvent, CVE, PolicyDecision, PublicationEvent
+from cve_service.models.enums import (
+    AIReviewOutcome,
+    ClassificationOutcome,
+    CveState,
+    EvidenceSignal,
+    EvidenceStatus,
+    PolicyDecisionOutcome,
+    PublicationEventStatus,
+    PublicationEventType,
+)
 from cve_service.services.ai_review import AIProviderRequest, AIProviderResponse, execute_ai_review, fingerprint_payload
 from cve_service.services.enrichment import EvidenceInput, record_evidence
 from cve_service.services.ingestion import PublicFeedRecord, ingest_public_feed_record
+from cve_service.services.public_feed import CveOrgRecordAdapter
 from cve_service.services.policy import PolicyRuntimeConfig, apply_policy_gate
 
 
@@ -319,6 +329,197 @@ def test_policy_config_change_produces_new_explainable_outcome(session_factory) 
     assert stricter_decision.conflict_resolution["selected_outcome"] == "DEFER"
 
 
+def test_low_epss_score_prevents_publication_even_when_ai_would_publish(session_factory) -> None:
+    provider = StaticProvider(
+        {
+            "cve_id": "CVE-2026-0505",
+            "enterprise_relevance_assessment": "enterprise_relevant",
+            "exploit_path_assessment": "internet_exploitable",
+            "confidence": 0.95,
+            "reasoning_summary": "Internet exploitable in enterprise deployments.",
+        }
+    )
+
+    with session_scope(session_factory) as session:
+        ingest_public_feed_record(session, _ambiguous_record("CVE-2026-0505"))
+        record_evidence(
+            session,
+            EvidenceInput(
+                cve_id="CVE-2026-0505",
+                signal_type=EvidenceSignal.POC,
+                status=EvidenceStatus.PRESENT,
+                source_name="trusted-poc-db",
+                source_record_id="poc-2026-0505",
+                evidence_timestamp=datetime(2026, 4, 2, 19, 40, tzinfo=UTC),
+                collected_at=datetime(2026, 4, 2, 19, 40, tzinfo=UTC),
+                freshness_ttl_seconds=14 * 24 * 60 * 60,
+                confidence=0.9,
+                raw_payload={"origin": "fixture"},
+            ),
+        )
+        cve = session.scalar(select(CVE).where(CVE.cve_id == "CVE-2026-0505"))
+        assert cve is not None
+        cve.external_enrichment = {
+            "sources": {
+                "epss": {
+                    "status": "completed",
+                    "score": 0.0012,
+                    "percentile": 0.04,
+                }
+            }
+        }
+        session.flush()
+
+        execute_ai_review(session, "CVE-2026-0505", provider)
+        gate = apply_policy_gate(session, "CVE-2026-0505")
+        decision = session.get(PolicyDecision, gate.decision_id)
+        stored_cve = session.scalar(select(CVE).where(CVE.cve_id == "CVE-2026-0505"))
+
+    assert gate.decision is PolicyDecisionOutcome.DEFER
+    assert gate.reason_codes == ("policy.defer.low_epss_score",)
+    assert stored_cve is not None
+    assert stored_cve.state is CveState.DEFERRED
+    assert decision is not None
+    assert decision.inputs_snapshot["external_enrichment"]["epss"] == {"score": 0.0012, "percentile": 0.04}
+    assert (
+        decision.inputs_snapshot["policy_configuration"]["snapshot"]["thresholds"]["minimum_epss_score_for_publication"]
+        == 0.1
+    )
+    assert decision.rationale["summary"] == "EPSS score 0.0012 is at or below configured threshold 0.1000, so policy defers publication."
+    assert decision.conflict_resolution["selected_outcome"] == "DEFER"
+
+
+def test_updated_old_microsoft_cve_with_en_us_description_is_deferred_as_stale(session_factory) -> None:
+    provider = StaticProvider(
+        {
+            "cve_id": "CVE-2026-26107",
+            "enterprise_relevance_assessment": "enterprise_relevant",
+            "exploit_path_assessment": "phishing_initial_access",
+            "confidence": 0.93,
+            "reasoning_summary": "Excel documents can deliver initial access in enterprise environments.",
+        }
+    )
+    payload = {
+        "cveMetadata": {
+            "cveId": "CVE-2026-26107",
+            "datePublished": "2026-03-10T17:05:18.106Z",
+            "dateUpdated": "2026-04-07T20:31:19.956Z",
+        },
+        "containers": {
+            "cna": {
+                "title": "Microsoft Excel Remote Code Execution Vulnerability",
+                "descriptions": [
+                    {
+                        "lang": "en-US",
+                        "value": "Heap corruption in Microsoft Excel lets a remote attacker execute code when a user opens a crafted file.",
+                    }
+                ],
+                "affected": [{"vendor": "Microsoft", "product": "Excel"}],
+                "metrics": [{"cvssV3_1": {"baseSeverity": "HIGH"}}],
+            }
+        },
+    }
+
+    with session_scope(session_factory) as session:
+        ingest_public_feed_record(session, CveOrgRecordAdapter().adapt(payload))
+        cve = session.scalar(select(CVE).where(CVE.cve_id == "CVE-2026-26107"))
+        assert cve is not None
+        assert cve.description == payload["containers"]["cna"]["descriptions"][0]["value"]
+        cve.external_enrichment = {
+            "sources": {
+                "epss": {
+                    "status": "completed",
+                    "score": 0.00062,
+                    "percentile": 0.02,
+                }
+            }
+        }
+        session.flush()
+
+        execute_ai_review(session, "CVE-2026-26107", provider)
+        gate = apply_policy_gate(
+            session,
+            "CVE-2026-26107",
+            evaluated_at=datetime(2026, 4, 7, 21, 17, tzinfo=UTC),
+        )
+        decision = session.get(PolicyDecision, gate.decision_id)
+
+    assert gate.decision is PolicyDecisionOutcome.DEFER
+    assert gate.reason_codes == ("policy.defer.stale_initial_publication",)
+    assert decision is not None
+    assert decision.inputs_snapshot["source"]["description"] == payload["containers"]["cna"]["descriptions"][0]["value"]
+    assert decision.inputs_snapshot["source"]["source_published_at"] == "2026-03-10T17:05:18.106000+00:00"
+    assert decision.inputs_snapshot["external_enrichment"]["epss"] == {"score": 0.00062, "percentile": 0.02}
+
+
+def test_recent_similar_x_publication_defers_duplicate_burst(session_factory) -> None:
+    provider = StaticProvider(
+        {
+            "cve_id": "CVE-2026-26109",
+            "enterprise_relevance_assessment": "enterprise_relevant",
+            "exploit_path_assessment": "phishing_initial_access",
+            "confidence": 0.92,
+            "reasoning_summary": "Spreadsheet-delivered payloads can establish initial access in enterprise inboxes.",
+        }
+    )
+
+    with session_scope(session_factory) as session:
+        baseline = ingest_public_feed_record(session, _excel_record("CVE-2026-26108"))
+        current = ingest_public_feed_record(session, _excel_record("CVE-2026-26109"))
+        assert baseline.classification_created is True
+        assert current.classification_created is True
+
+        baseline_cve = session.scalar(select(CVE).where(CVE.cve_id == "CVE-2026-26108"))
+        assert baseline_cve is not None
+        session.add(
+            PublicationEvent(
+                cve_id=baseline_cve.id,
+                decision_id=None,
+                policy_snapshot_id=None,
+                event_type=PublicationEventType.INITIAL,
+                status=PublicationEventStatus.PUBLISHED,
+                destination="x",
+                idempotency_key="test-x-initial-26108",
+                content_hash="content-26108",
+                external_id="2041139523296370995",
+                published_at=datetime(2026, 4, 7, 21, 19, tzinfo=UTC),
+                payload_snapshot={
+                    "publish_content": {
+                        "title": "CVE-2026-26108: Microsoft Excel Remote Code Execution Vulnerability",
+                        "metadata": {
+                            "canonical_name": "microsoft:excel",
+                        },
+                    },
+                    "replay_context": {
+                        "cve": {
+                            "title": "Microsoft Excel Remote Code Execution Vulnerability",
+                        },
+                        "classification": {
+                            "canonical_name": "microsoft:excel",
+                        },
+                    },
+                },
+            )
+        )
+        session.flush()
+
+        execute_ai_review(session, "CVE-2026-26109", provider)
+        gate = apply_policy_gate(
+            session,
+            "CVE-2026-26109",
+            evaluated_at=datetime(2026, 4, 7, 21, 19, 10, tzinfo=UTC),
+        )
+        decision = session.get(PolicyDecision, gate.decision_id)
+
+    assert gate.decision is PolicyDecisionOutcome.DEFER
+    assert gate.reason_codes == ("policy.defer.recent_similar_publication",)
+    assert decision is not None
+    assert len(decision.inputs_snapshot["publication_context"]["recent_similar_x_publication_ids"]) == 1
+    assert decision.rationale["publication_context"]["recent_similar_x_publication_ids"] == (
+        decision.inputs_snapshot["publication_context"]["recent_similar_x_publication_ids"]
+    )
+
+
 def _ambiguous_record(cve_id: str) -> PublicFeedRecord:
     return PublicFeedRecord(
         cve_id=cve_id,
@@ -329,4 +530,18 @@ def _ambiguous_record(cve_id: str) -> PublicFeedRecord:
         source_modified_at=datetime(2026, 4, 2, 19, 0, tzinfo=UTC),
         vendor_name="Acme",
         product_name="Widget Gateway",
+    )
+
+
+def _excel_record(cve_id: str) -> PublicFeedRecord:
+    return PublicFeedRecord(
+        cve_id=cve_id,
+        title="Microsoft Excel Remote Code Execution Vulnerability",
+        description="Heap corruption in Microsoft Excel lets a remote attacker execute code when a user opens a crafted file.",
+        severity="HIGH",
+        source_name="fixture-feed",
+        source_published_at=datetime(2026, 4, 7, 20, 31, tzinfo=UTC),
+        source_modified_at=datetime(2026, 4, 7, 20, 31, tzinfo=UTC),
+        vendor_name="Microsoft",
+        product_name="Excel",
     )

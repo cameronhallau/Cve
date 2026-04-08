@@ -31,6 +31,31 @@ def test_cve_org_adapter_maps_record_to_public_feed_record() -> None:
     assert record.severity == "CRITICAL"
 
 
+def test_cve_org_adapter_accepts_english_regional_description_variants() -> None:
+    payload = {
+        "cveMetadata": {
+            "cveId": "CVE-2026-1003",
+            "datePublished": "2026-04-02T08:00:00Z",
+            "dateUpdated": "2026-04-02T09:30:00Z",
+        },
+        "containers": {
+            "cna": {
+                "title": "Excel RCE",
+                "descriptions": [
+                    {"lang": "fr", "value": "Texte francais."},
+                    {"lang": "en-US", "value": "English regional description."},
+                ],
+                "affected": [{"vendor": "Microsoft", "product": "Excel"}],
+                "metrics": [{"cvssV3_1": {"baseSeverity": "HIGH"}}],
+            }
+        },
+    }
+
+    record = CveOrgRecordAdapter().adapt(payload)
+
+    assert record.description == "English regional description."
+
+
 def test_cve_org_adapter_maps_bundle_to_multiple_records() -> None:
     bundle = {
         "cves": [

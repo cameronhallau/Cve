@@ -47,6 +47,19 @@ def test_build_x_thread_plan_formats_initial_payload_deterministically() -> None
     assert "Scope:" not in combined
 
 
+def test_build_x_thread_plan_preserves_literal_escape_sequences() -> None:
+    request = _initial_request(
+        description=r"Undertow request smuggling via \r\r\r header terminator.",
+        description_brief=r"Undertow request smuggling via \r\r\r header terminator.",
+    )
+
+    posts = build_x_thread_plan(request)
+
+    assert len(posts) == 1
+    assert r"\r\r\r" in posts[0].text
+    assert "via r r r" not in posts[0].text
+
+
 def test_x_publish_target_posts_update_threads_as_replies() -> None:
     captured_requests: list[dict[str, object]] = []
     response_ids = ["x-post-100"]

@@ -43,9 +43,18 @@ def ingest_cve_org_bundle(session, payload: dict[str, Any], adapter: CveOrgRecor
 
 
 def _english_description(descriptions: list[dict[str, Any]]) -> str | None:
+    fallback: str | None = None
     for description in descriptions:
-        if description.get("lang") == "en" and description.get("value"):
-            return str(description["value"])
+        value = description.get("value")
+        if not value:
+            continue
+        language = str(description.get("lang") or "").strip().lower().replace("_", "-")
+        if language == "en":
+            return str(value)
+        if fallback is None and language.startswith("en-"):
+            fallback = str(value)
+    if fallback is not None:
+        return fallback
     return None
 
 

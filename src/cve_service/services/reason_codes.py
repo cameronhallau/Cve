@@ -53,6 +53,26 @@ _REGISTRY: dict[str, ReasonCodeDefinition] = {
         title="Low AI Confidence",
         summary="The AI advisory confidence is too low to influence policy.",
     ),
+    "policy.defer.low_epss_score": ReasonCodeDefinition(
+        code="policy.defer.low_epss_score",
+        title="Low EPSS Score",
+        summary="The EPSS score is below the configured publication threshold, so policy fails closed.",
+    ),
+    "policy.defer.stale_initial_publication": ReasonCodeDefinition(
+        code="policy.defer.stale_initial_publication",
+        title="Stale Initial Publication",
+        summary="The CVE was originally published outside the freshness window and lacks a trusted override signal, so policy defers initial publication.",
+    ),
+    "policy.defer.insufficient_source_description": ReasonCodeDefinition(
+        code="policy.defer.insufficient_source_description",
+        title="Insufficient Source Description",
+        summary="The source description is missing or too weak to support AI-led publication, so policy fails closed.",
+    ),
+    "policy.defer.recent_similar_publication": ReasonCodeDefinition(
+        code="policy.defer.recent_similar_publication",
+        title="Recent Similar Publication",
+        summary="A similar X publication was posted recently, so policy defers likely duplicate burst content.",
+    ),
     "policy.defer.ai_review_required": ReasonCodeDefinition(
         code="policy.defer.ai_review_required",
         title="AI Review Required",

@@ -340,13 +340,29 @@ def _join_sections(sections: list[str]) -> str:
 
 
 def _normalize_section(text: str) -> str:
-    raw_text = str(text)
+    raw_text = _escape_control_characters(str(text))
     trailing_newline = raw_text.endswith("\n")
     normalized_lines = [" ".join(line.split()) for line in raw_text.splitlines()]
     normalized = "\n".join(normalized_lines).strip()
     if trailing_newline and normalized:
         return normalized + "\n"
     return normalized
+
+
+def _escape_control_characters(text: str) -> str:
+    escaped: list[str] = []
+    for char in text:
+        if char == "\n":
+            escaped.append(char)
+        elif char == "\r":
+            escaped.append("\\r")
+        elif char == "\t":
+            escaped.append("\\t")
+        elif ord(char) < 32 or ord(char) == 127:
+            escaped.append(f"\\x{ord(char):02x}")
+        else:
+            escaped.append(char)
+    return "".join(escaped)
 
 
 def _format_signal_summary(payload: dict[str, Any]) -> str:
