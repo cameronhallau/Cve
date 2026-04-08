@@ -13,7 +13,7 @@ from cve_service.models.enums import (
     PolicyDecisionOutcome,
 )
 from cve_service.services.publish_content import build_initial_publish_content, build_update_publish_content
-from cve_service.services.publication import prepare_initial_publication
+from cve_service.services.publication import _extract_cve_org_reference_links, prepare_initial_publication
 
 
 def test_build_initial_publish_content_is_canonical_and_replayable() -> None:
@@ -148,15 +148,55 @@ def test_build_update_publish_content_uses_stored_material_change_snapshot() -> 
     assert "publication:update" in content.as_payload()["labels"]
 
 
+def test_extract_cve_org_reference_links_labels_and_prioritizes_relevant_urls() -> None:
+    raw_payload = {
+        "containers": {
+            "cna": {
+                "references": [
+                    {"url": "https://vendor.example/advisory", "tags": ["vendor-advisory"]},
+                    {"url": "https://research.example/write-up", "tags": ["technical-description"]},
+                    {"url": "https://github.com/example/repo/blob/main/poc.py", "tags": ["exploit"]},
+                    {"url": "https://www.cisa.gov/known-exploited-vulnerabilities-catalog", "tags": ["government-resource"]},
+                    {"url": "https://vendor.example/releases/1.2.3", "tags": ["release-notes"]},
+                    {"url": "https://vendor.example/src/file.c#L10"},
+                ]
+            }
+        }
+    }
+
+    links = _extract_cve_org_reference_links(raw_payload)
+
+    assert [item["url"] for item in links["vendor"]] == [
+        "https://vendor.example/advisory",
+        "https://vendor.example/releases/1.2.3",
+    ]
+    assert [item["url"] for item in links["research"]] == [
+        "https://research.example/write-up",
+        "https://vendor.example/src/file.c#L10",
+    ]
+    assert [item["url"] for item in links["poc"]] == ["https://github.com/example/repo/blob/main/poc.py"]
+    assert [item["url"] for item in links["itw"]] == ["https://www.cisa.gov/known-exploited-vulnerabilities-catalog"]
+
+
 def test_prepare_initial_publication_changes_idempotency_key_per_target(session_factory) -> None:
+    from cve_service.services.ai_review import AIProviderResponse
     from cve_service.core.db import session_scope
     from cve_service.services.enrichment import EvidenceInput, record_evidence
     from cve_service.services.ingestion import PublicFeedRecord, ingest_public_feed_record
     from cve_service.services.post_enrichment import process_post_enrichment_workflow
 
-    class NeverCalledProvider:
-        def review(self, request):  # pragma: no cover - deterministic candidate never routes to AI
-            raise AssertionError("AI should not be called for deterministic candidates")
+    class PublishableProvider:
+        def review(self, request):
+            return AIProviderResponse(
+                model_name="mock-gpt",
+                payload={
+                    "cve_id": request.request_payload["cve_id"],
+                    "enterprise_relevance_assessment": "enterprise_relevant",
+                    "exploit_path_assessment": "internet_exploitable",
+                    "confidence": 0.96,
+                    "reasoning_summary": "Publishable in enterprise deployments.",
+                },
+            )
 
     with session_scope(session_factory) as session:
         ingest_public_feed_record(
@@ -186,10 +226,83 @@ def test_prepare_initial_publication_changes_idempotency_key_per_target(session_
                 confidence=0.9,
             ),
         )
-        process_post_enrichment_workflow(session, "CVE-2026-0701", NeverCalledProvider())
+        process_post_enrichment_workflow(session, "CVE-2026-0701", PublishableProvider())
 
         console_prepared = prepare_initial_publication(session, "CVE-2026-0701", target_name="console")
         inline_prepared = prepare_initial_publication(session, "CVE-2026-0701", target_name="inline")
 
     assert console_prepared.content_hash == inline_prepared.content_hash
     assert console_prepared.idempotency_key != inline_prepared.idempotency_key
+
+
+def test_prepare_initial_publication_carries_cve_org_reference_links(session_factory) -> None:
+    from cve_service.services.ai_review import AIProviderResponse
+    from cve_service.core.db import session_scope
+    from cve_service.services.enrichment import EvidenceInput, record_evidence
+    from cve_service.services.ingestion import PublicFeedRecord, ingest_public_feed_record
+    from cve_service.services.post_enrichment import process_post_enrichment_workflow
+
+    class PublishableProvider:
+        def review(self, request):
+            return AIProviderResponse(
+                model_name="mock-gpt",
+                payload={
+                    "cve_id": request.request_payload["cve_id"],
+                    "enterprise_relevance_assessment": "enterprise_relevant",
+                    "exploit_path_assessment": "internet_exploitable",
+                    "confidence": 0.96,
+                    "reasoning_summary": "Publishable in enterprise deployments.",
+                },
+            )
+
+    with session_scope(session_factory) as session:
+        ingest_public_feed_record(
+            session,
+            PublicFeedRecord(
+                cve_id="CVE-2026-0703",
+                title="Exchange Server RCE",
+                description="Remote code execution in Exchange Server.",
+                severity="CRITICAL",
+                source_name="cve.org",
+                source_modified_at=datetime(2026, 4, 2, 22, 0, tzinfo=UTC),
+                vendor_name="Microsoft",
+                product_name="Exchange Server",
+                raw_payload={
+                    "cveMetadata": {"cveId": "CVE-2026-0703"},
+                    "containers": {
+                        "cna": {
+                            "references": [
+                                {"url": "https://vendor.example/advisory", "tags": ["vendor-advisory"]},
+                                {"url": "https://research.example/write-up", "tags": ["technical-description"]},
+                                {"url": "https://github.com/example/repo/blob/main/poc.py", "tags": ["exploit"]},
+                            ]
+                        }
+                    },
+                },
+            ),
+        )
+        record_evidence(
+            session,
+            EvidenceInput(
+                cve_id="CVE-2026-0703",
+                signal_type=EvidenceSignal.POC,
+                status=EvidenceStatus.PRESENT,
+                source_name="trusted-poc-db",
+                source_record_id="poc-2026-0703",
+                collected_at=datetime(2026, 4, 2, 22, 5, tzinfo=UTC),
+                evidence_timestamp=datetime(2026, 4, 2, 22, 5, tzinfo=UTC),
+                freshness_ttl_seconds=86400,
+                confidence=0.9,
+            ),
+        )
+        process_post_enrichment_workflow(session, "CVE-2026-0703", PublishableProvider())
+
+        prepared = prepare_initial_publication(session, "CVE-2026-0703", target_name="x")
+
+    assert prepared.content.metadata["reference_links"]["vendor"][0]["url"] == "https://vendor.example/advisory"
+    assert prepared.content.metadata["reference_links"]["research"][0]["url"] == "https://research.example/write-up"
+    assert prepared.content.metadata["reference_links"]["poc"][0]["url"] == "https://github.com/example/repo/blob/main/poc.py"
+    assert (
+        prepared.payload_snapshot["replay_context"]["source_references"]["links"]["vendor"][0]["url"]
+        == "https://vendor.example/advisory"
+    )

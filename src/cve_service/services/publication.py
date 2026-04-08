@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any
+from urllib.parse import urlparse
 from uuid import UUID
 
 from sqlalchemy import select
@@ -12,6 +13,7 @@ from cve_service.models.entities import (
     AIReview,
     AuditEvent,
     CVE,
+    CVEIngestionSnapshot,
     Classification,
     PolicyConfigurationSnapshot,
     PolicyDecision,
@@ -44,6 +46,7 @@ PUBLICATION_EVENT_SCHEMA_VERSION = "phase4-publication-event.v1"
 UPDATE_PUBLICATION_EVENT_SCHEMA_VERSION = "phase5-update-publication-event.v1"
 UPDATE_PUBLICATION_METRIC_KEY = "phase5.update_publication.outcomes.total"
 X_PUBLICATION_METRIC_KEY = "phase6.x_publication.outcomes.total"
+MAX_REFERENCE_LINKS_PER_CATEGORY = 2
 
 
 @dataclass(frozen=True, slots=True)
@@ -130,6 +133,7 @@ def prepare_initial_publication(
 
     ai_review = _get_latest_ai_review(session, cve.id)
     policy_snapshot = decision.policy_snapshot
+    reference_links = _get_cve_org_reference_links(session, cve.id)
     description_brief_metadata = _resolve_initial_description_brief_metadata(
         session,
         cve=cve,
@@ -142,6 +146,7 @@ def prepare_initial_publication(
         classification=classification,
         decision=decision,
         ai_review=ai_review,
+        reference_links=reference_links,
     )
     content_hash = fingerprint_payload(content.as_payload())
     idempotency_key = fingerprint_payload(
@@ -174,6 +179,7 @@ def prepare_initial_publication(
             content_hash=content_hash,
             idempotency_key=idempotency_key,
             description_brief_metadata=description_brief_metadata,
+            reference_links=reference_links,
         ),
     )
 
@@ -204,7 +210,8 @@ def prepare_update_publication(
     if policy_snapshot is None and decision is not None:
         policy_snapshot = decision.policy_snapshot
     ai_review = _get_latest_ai_review(session, cve.id)
-    content = build_update_publish_content(update_candidate=update_candidate)
+    reference_links = _get_cve_org_reference_links(session, cve.id)
+    content = build_update_publish_content(update_candidate=update_candidate, reference_links=reference_links)
     content_hash = fingerprint_payload(content.as_payload())
     idempotency_key = fingerprint_payload(
         {
@@ -239,6 +246,7 @@ def prepare_update_publication(
             content=content,
             content_hash=content_hash,
             idempotency_key=idempotency_key,
+            reference_links=reference_links,
         ),
         update_candidate=update_candidate,
         baseline_publication_event=baseline_publication_event,
@@ -786,6 +794,7 @@ def _build_initial_publication_payload_snapshot(
     content_hash: str,
     idempotency_key: str,
     description_brief_metadata: dict[str, Any],
+    reference_links: dict[str, Any],
 ) -> dict[str, Any]:
     return {
         "schema_version": PUBLICATION_EVENT_SCHEMA_VERSION,
@@ -814,6 +823,10 @@ def _build_initial_publication_payload_snapshot(
                 "source": description_brief_metadata.get("description_brief_source"),
                 "model_name": description_brief_metadata.get("description_brief_model_name"),
                 "prompt_version": description_brief_metadata.get("description_brief_prompt_version"),
+            },
+            "source_references": {
+                "origin": "cve.org",
+                "links": reference_links,
             },
         },
         "content_hash": content_hash,
@@ -894,6 +907,7 @@ def _build_update_publication_payload_snapshot(
     content: PublishContent,
     content_hash: str,
     idempotency_key: str,
+    reference_links: dict[str, Any],
 ) -> dict[str, Any]:
     lineage_root = _resolve_lineage_root_publication_event(session, baseline_publication_event)
     return {
@@ -918,6 +932,10 @@ def _build_update_publication_payload_snapshot(
             "policy_decision": _serialize_policy_decision(decision),
             "policy_configuration": _serialize_policy_configuration(policy_snapshot, decision),
             "ai_review": _serialize_ai_review(ai_review),
+            "source_references": {
+                "origin": "cve.org",
+                "links": reference_links,
+            },
             "update_candidate": {
                 "id": str(update_candidate.id),
                 "comparison_fingerprint": update_candidate.comparison_fingerprint,
@@ -1021,6 +1039,15 @@ def _get_latest_ai_review(session: Session, cve_pk: UUID) -> AIReview | None:
     )
 
 
+def _get_latest_ingestion_snapshot(session: Session, cve_pk: UUID) -> CVEIngestionSnapshot | None:
+    return session.scalar(
+        select(CVEIngestionSnapshot)
+        .where(CVEIngestionSnapshot.cve_id == cve_pk)
+        .order_by(CVEIngestionSnapshot.snapshot_index.desc(), CVEIngestionSnapshot.id.desc())
+        .limit(1)
+    )
+
+
 def _get_latest_policy_decision(session: Session, cve_pk: UUID) -> PolicyDecision | None:
     return session.scalar(
         select(PolicyDecision)
@@ -1062,6 +1089,178 @@ def _get_existing_initial_publish_metadata(session: Session, cve_pk: UUID, *, ta
     publish_content = payload_snapshot.get("publish_content") or {}
     metadata = publish_content.get("metadata") or {}
     return dict(metadata) if isinstance(metadata, dict) else {}
+
+
+def _get_cve_org_reference_links(session: Session, cve_pk: UUID) -> dict[str, Any]:
+    snapshot = _get_latest_ingestion_snapshot(session, cve_pk)
+    if snapshot is None or snapshot.source_name != "cve.org":
+        return {}
+    return _extract_cve_org_reference_links(snapshot.raw_payload)
+
+
+def _extract_cve_org_reference_links(raw_payload: Any) -> dict[str, Any]:
+    if not isinstance(raw_payload, dict):
+        return {}
+
+    categorized: dict[str, list[dict[str, Any]]] = {
+        "vendor": [],
+        "research": [],
+        "poc": [],
+        "itw": [],
+    }
+    for index, reference in enumerate(_iter_cve_org_reference_entries(raw_payload)):
+        url = reference.get("url")
+        if not isinstance(url, str) or not url:
+            continue
+        category = _classify_cve_org_reference(reference)
+        categorized[category].append(
+            {
+                "url": url,
+                "name": reference.get("name"),
+                "tags": list(reference.get("tags") or ()),
+                "_index": index,
+            }
+        )
+
+    result: dict[str, Any] = {}
+    for category, entries in categorized.items():
+        if not entries:
+            continue
+        selected = sorted(
+            entries,
+            key=lambda item: (-_reference_priority_score(item, category), item["_index"]),
+        )[:MAX_REFERENCE_LINKS_PER_CATEGORY]
+        result[category] = [
+            {
+                "url": item["url"],
+                "name": item.get("name"),
+                "tags": item.get("tags", []),
+            }
+            for item in sorted(selected, key=lambda item: item["_index"])
+        ]
+    return result
+
+
+def _iter_cve_org_reference_entries(raw_payload: dict[str, Any]) -> list[dict[str, Any]]:
+    containers = raw_payload.get("containers")
+    if not isinstance(containers, dict):
+        return []
+
+    references: list[dict[str, Any]] = []
+    cna = containers.get("cna")
+    if isinstance(cna, dict):
+        references.extend(_coerce_reference_list(cna.get("references")))
+
+    adp_entries = containers.get("adp")
+    if isinstance(adp_entries, list):
+        for adp in adp_entries:
+            if isinstance(adp, dict):
+                references.extend(_coerce_reference_list(adp.get("references")))
+    return references
+
+
+def _coerce_reference_list(value: Any) -> list[dict[str, Any]]:
+    if not isinstance(value, list):
+        return []
+
+    references: list[dict[str, Any]] = []
+    for item in value:
+        if not isinstance(item, dict):
+            continue
+        tags = item.get("tags")
+        references.append(
+            {
+                "url": item.get("url"),
+                "name": item.get("name"),
+                "tags": [str(tag).strip().lower() for tag in tags if isinstance(tag, str) and tag.strip()]
+                if isinstance(tags, list)
+                else [],
+            }
+        )
+    return references
+
+
+def _classify_cve_org_reference(reference: dict[str, Any]) -> str:
+    url = str(reference.get("url") or "").lower()
+    tags = {str(tag).strip().lower() for tag in reference.get("tags") or ()}
+
+    if _looks_like_itw_reference(url):
+        return "itw"
+    if "exploit" in tags or _looks_like_poc_reference(url):
+        return "poc"
+    if {"vendor-advisory", "patch", "release-notes"} & tags:
+        return "vendor"
+    return "research"
+
+
+def _reference_priority_score(reference: dict[str, Any], category: str) -> int:
+    url = str(reference.get("url") or "").lower()
+    tags = {str(tag).strip().lower() for tag in reference.get("tags") or ()}
+    score = 0
+
+    if category == "itw" and _looks_like_itw_reference(url):
+        score += 60
+    if category == "poc" and ("exploit" in tags or _looks_like_poc_reference(url)):
+        score += 50
+    if category == "vendor":
+        if "vendor-advisory" in tags:
+            score += 60
+        if "patch" in tags:
+            score += 30
+        if "release-notes" in tags:
+            score += 20
+    if category == "research" and tags:
+        score += 20
+
+    if not _looks_like_low_signal_code_reference(url):
+        score += 10
+    if reference.get("name"):
+        score += 5
+    return score
+
+
+def _looks_like_itw_reference(url: str) -> bool:
+    return any(
+        marker in url
+        for marker in (
+            "known-exploited",
+            "known_exploited",
+            "vulncheck-kev",
+            "/kev",
+            "catalog.cisa.gov/known-exploited",
+        )
+    )
+
+
+def _looks_like_poc_reference(url: str) -> bool:
+    parsed = urlparse(url)
+    host = parsed.netloc.lower()
+    path = parsed.path.lower()
+    return any(
+        marker in host or marker in path
+        for marker in (
+            "exploit-db.com",
+            "packetstormsecurity.com",
+            "/exploit",
+            "/poc",
+            "proof-of-concept",
+        )
+    ) or ("github.com" in host and any(marker in path for marker in ("/blob/", "/raw/", "/tree/", "exploit", "poc")))
+
+
+def _looks_like_low_signal_code_reference(url: str) -> bool:
+    lowered = url.lower()
+    return any(
+        marker in lowered
+        for marker in (
+            "/blob/",
+            "/browser/",
+            "#l",
+            "#file",
+            "/commit/",
+            "/compare/",
+        )
+    )
 
 
 def _get_publication_event_by_idempotency(session: Session, idempotency_key: str) -> PublicationEvent | None:

@@ -36,6 +36,7 @@ def build_initial_publish_content(
     classification: Classification,
     decision: PolicyDecision,
     ai_review: AIReview | None,
+    reference_links: dict[str, Any] | None = None,
 ) -> PublishContent:
     canonical_name = classification.details.get("canonical_name")
     product_scope = classification.details.get("product_scope")
@@ -67,6 +68,7 @@ def build_initial_publish_content(
             if external_enrichment
             else []
         ),
+        *_format_reference_links(reference_links),
         f"AI Advisory Used: {'yes' if ai_review is not None and ai_review.schema_valid else 'no'}",
         f"Description: {cve.description or 'No description provided.'}",
     ]
@@ -93,6 +95,7 @@ def build_initial_publish_content(
         "policy_reason_codes": list(decision.reason_codes),
         "ai_review_used": bool(ai_review is not None and ai_review.schema_valid),
         "external_enrichment": external_enrichment,
+        "reference_links": reference_links or {},
     }
     return PublishContent(
         schema_version=PUBLISH_CONTENT_SCHEMA_VERSION,
@@ -107,6 +110,7 @@ def build_initial_publish_content(
 def build_update_publish_content(
     *,
     update_candidate: UpdateCandidate,
+    reference_links: dict[str, Any] | None = None,
 ) -> PublishContent:
     snapshot = update_candidate.comparison_snapshot or {}
     baseline = snapshot.get("baseline", {})
@@ -154,6 +158,7 @@ def build_update_publish_content(
             f"PoC={_format_snapshot_signal(current, 'poc')}, "
             f"ITW={_format_snapshot_signal(current, 'itw')}"
         ),
+        *_format_reference_links(reference_links),
     ]
     labels = tuple(
         label
@@ -179,6 +184,7 @@ def build_update_publish_content(
         "material_changes": material_changes,
         "baseline_evidence": baseline.get("evidence", {}),
         "current_evidence": current.get("evidence", {}),
+        "reference_links": reference_links or {},
     }
     return PublishContent(
         schema_version=UPDATE_PUBLISH_CONTENT_SCHEMA_VERSION,
@@ -239,6 +245,30 @@ def _format_external_enrichment(summary: dict[str, Any]) -> str:
             formatted_sources.append(f"{source_name}=checked")
 
     return ", ".join(formatted_sources) if formatted_sources else "not-run"
+
+
+def _format_reference_links(reference_links: dict[str, Any] | None) -> list[str]:
+    if not isinstance(reference_links, dict):
+        return []
+
+    lines: list[str] = []
+    for key, label in (
+        ("vendor", "Vendor Link"),
+        ("research", "Research Link"),
+        ("poc", "PoC Link"),
+        ("itw", "ITW Link"),
+    ):
+        values = reference_links.get(key)
+        if not isinstance(values, list):
+            continue
+        for item in values:
+            if isinstance(item, dict):
+                url = item.get("url")
+            else:
+                url = item
+            if isinstance(url, str) and url:
+                lines.append(f"{label}: {url}")
+    return lines
 
 
 def _format_snapshot_signal(snapshot: dict[str, Any], signal_name: str) -> str:

@@ -60,6 +60,24 @@ def test_build_x_thread_plan_preserves_literal_escape_sequences() -> None:
     assert "via r r r" not in posts[0].text
 
 
+def test_build_x_thread_plan_includes_labeled_reference_links_only_when_present() -> None:
+    request = _initial_request(
+        reference_links={
+            "vendor": [{"url": "https://vendor.example/advisory"}],
+            "research": [{"url": "https://research.example/write-up"}],
+            "poc": [{"url": "https://github.com/example/repo/blob/main/poc.py"}],
+        }
+    )
+
+    posts = build_x_thread_plan(request)
+    text = posts[0].text
+
+    assert "Vendor Link: https://vendor.example/advisory" in text
+    assert "Research Link: https://research.example/write-up" in text
+    assert "PoC Link: https://github.com/example/repo/blob/main/poc.py" in text
+    assert "ITW Link:" not in text
+
+
 def test_x_publish_target_posts_update_threads_as_replies() -> None:
     captured_requests: list[dict[str, object]] = []
     response_ids = ["x-post-100"]
@@ -181,6 +199,7 @@ def _initial_request(
     *,
     description: str = "Enterprise Exchange Server RCE with exploit evidence.",
     description_brief: str = "In Microsoft Exchange Server, an unauth attacker can trigger RCE.",
+    reference_links: dict[str, object] | None = None,
 ) -> PublishRequest:
     return PublishRequest(
         cve_id="CVE-2026-6100",
@@ -206,12 +225,17 @@ def _initial_request(
                 "poc_status": "UNKNOWN",
                 "itw_status": "UNKNOWN",
                 "policy_reason_codes": ["policy.publish.enterprise_candidate_with_poc"],
+                "reference_links": reference_links or {},
             },
         ),
         payload_snapshot={
             "replay_context": {
                 "cve": {
                     "description": description,
+                },
+                "source_references": {
+                    "origin": "cve.org",
+                    "links": reference_links or {},
                 },
                 "description_compression": {
                     "description_brief": description_brief,

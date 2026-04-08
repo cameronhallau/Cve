@@ -282,6 +282,9 @@ def _build_sections(request: PublishRequest) -> list[str]:
                 else "Reasons: none",
             )
         )
+        links_section = _format_reference_links(metadata.get("reference_links"))
+        if links_section:
+            sections.append(links_section)
         return sections
 
     description = ((replay_context.get("cve") or {}).get("description")) or "No description provided."
@@ -289,13 +292,18 @@ def _build_sections(request: PublishRequest) -> list[str]:
     classification_details = classification.get("details") or {}
     description_compression = replay_context.get("description_compression") or {}
     description_brief = description_compression.get("description_brief") or description
+    reference_links = metadata.get("reference_links")
+    if not isinstance(reference_links, dict):
+        source_references = replay_context.get("source_references") or {}
+        if isinstance(source_references, dict):
+            reference_links = source_references.get("links")
     product = (
         metadata.get("canonical_name")
         or classification.get("canonical_name")
         or classification_details.get("canonical_name")
         or "unknown-product"
     )
-    return [
+    sections = [
         request.cve_id,
         description_brief,
         "\n".join(
@@ -307,6 +315,10 @@ def _build_sections(request: PublishRequest) -> list[str]:
             )
         ),
     ]
+    links_section = _format_reference_links(reference_links)
+    if links_section:
+        sections.append(links_section)
+    return sections
 
 
 def _extract_initial_reply_to_post_id(request: PublishRequest) -> str | None:
@@ -337,6 +349,30 @@ def _join_sections(sections: list[str]) -> str:
     if not normalized_sections:
         return "CVE publication payload was empty"
     return "\n\n".join(normalized_sections)
+
+
+def _format_reference_links(reference_links: Any) -> str | None:
+    if not isinstance(reference_links, dict):
+        return None
+
+    lines: list[str] = []
+    for key, label in (
+        ("vendor", "Vendor Link"),
+        ("research", "Research Link"),
+        ("poc", "PoC Link"),
+        ("itw", "ITW Link"),
+    ):
+        values = reference_links.get(key)
+        if not isinstance(values, list):
+            continue
+        for item in values:
+            if isinstance(item, dict):
+                url = item.get("url")
+            else:
+                url = item
+            if isinstance(url, str) and url:
+                lines.append(f"{label}: {url}")
+    return "\n".join(lines) if lines else None
 
 
 def _normalize_section(text: str) -> str:
