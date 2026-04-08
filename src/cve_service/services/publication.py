@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import UTC, datetime
+import re
 from typing import Any
 from urllib.parse import urlparse
 from uuid import UUID
@@ -148,7 +149,21 @@ def prepare_initial_publication(
         ai_review=ai_review,
         reference_links=reference_links,
     )
-    content_hash = fingerprint_payload(content.as_payload())
+    x_post_context = (
+        _build_initial_x_post_context(
+            session,
+            cve=cve,
+            classification=classification,
+            description_brief_metadata=description_brief_metadata,
+            reference_links=reference_links,
+        )
+        if target_name == "x"
+        else None
+    )
+    content_hash = _compute_initial_publication_content_hash(
+        content=content,
+        x_post_context=x_post_context,
+    )
     idempotency_key = fingerprint_payload(
         {
             "cve_id": cve.cve_id,
@@ -180,6 +195,7 @@ def prepare_initial_publication(
             idempotency_key=idempotency_key,
             description_brief_metadata=description_brief_metadata,
             reference_links=reference_links,
+            x_post_context=x_post_context,
         ),
     )
 
@@ -795,6 +811,7 @@ def _build_initial_publication_payload_snapshot(
     idempotency_key: str,
     description_brief_metadata: dict[str, Any],
     reference_links: dict[str, Any],
+    x_post_context: dict[str, Any] | None,
 ) -> dict[str, Any]:
     return {
         "schema_version": PUBLICATION_EVENT_SCHEMA_VERSION,
@@ -824,6 +841,7 @@ def _build_initial_publication_payload_snapshot(
                 "model_name": description_brief_metadata.get("description_brief_model_name"),
                 "prompt_version": description_brief_metadata.get("description_brief_prompt_version"),
             },
+            "x_post": x_post_context,
             "source_references": {
                 "origin": "cve.org",
                 "links": reference_links,
@@ -891,6 +909,380 @@ def _resolve_initial_description_brief_metadata(
         "description_brief_model_name": result.model_name,
         "description_brief_prompt_version": result.prompt_version,
     }
+
+
+def _compute_initial_publication_content_hash(
+    *,
+    content: PublishContent,
+    x_post_context: dict[str, Any] | None,
+) -> str:
+    if not x_post_context:
+        return fingerprint_payload(content.as_payload())
+    return fingerprint_payload(
+        {
+            "publish_content": content.as_payload(),
+            "x_post": x_post_context,
+        }
+    )
+
+
+def _build_initial_x_post_context(
+    session: Session,
+    *,
+    cve: CVE,
+    classification: Classification,
+    description_brief_metadata: dict[str, Any],
+    reference_links: dict[str, Any],
+) -> dict[str, Any]:
+    snapshot = _get_latest_ingestion_snapshot(session, cve.id)
+    raw_payload = snapshot.raw_payload if snapshot is not None else {}
+    canonical_vendor_name = classification.details.get("canonical_vendor_name")
+    canonical_product_name = classification.details.get("canonical_product_name")
+    affected_product = _extract_x_affected_product(
+        raw_payload,
+        canonical_vendor_name=canonical_vendor_name,
+        canonical_product_name=canonical_product_name,
+    )
+    return {
+        "primary_product": affected_product or _format_product_name(canonical_vendor_name, canonical_product_name),
+        "vulnerability_type": _derive_vulnerability_type(cve.title, cve.description),
+        "description": description_brief_metadata.get("description_brief") or "No description provided.",
+        "severity": _humanize_severity(cve.severity),
+        "exploitation": _render_initial_exploitation_status(cve.itw_status.value),
+        "public_poc": _render_initial_binary_status(cve.poc_status.value),
+        "patch_available": _extract_patch_availability(raw_payload, reference_links=reference_links),
+        "affected_product": affected_product or "Unknown",
+        "affected_version": _extract_x_affected_version(
+            raw_payload,
+            canonical_product_name=canonical_product_name,
+        )
+        or "Unknown",
+        "mitigations": _extract_source_backed_mitigations(raw_payload),
+    }
+
+
+def _derive_vulnerability_type(title: str | None, description: str | None) -> str:
+    haystack = " ".join(part for part in (title, description) if part).lower()
+    vulnerability_types = (
+        (r"\bremote code execution\b|\brace\b", "Remote Code Execution"),
+        (r"\bprivilege escalation\b|\beop\b", "Privilege Escalation"),
+        (r"\bdenial of service\b|\bdos\b", "Denial of Service"),
+        (r"\bsql injection\b", "SQL Injection"),
+        (r"\bcommand injection\b", "Command Injection"),
+        (r"\bpath traversal\b|\bdirectory traversal\b", "Path Traversal"),
+        (r"\bauthentication bypass\b|\bauth bypass\b", "Authentication Bypass"),
+        (r"\bserver-side request forgery\b|\bssrf\b", "Server-Side Request Forgery"),
+        (r"\bxml external entity\b|\bxxe\b", "XML External Entity Injection"),
+        (r"\bdeserialization\b", "Deserialization"),
+        (r"\bcross-site scripting\b|\bxss\b", "Cross-Site Scripting"),
+        (r"\bcross-site request forgery\b|\bcsrf\b", "Cross-Site Request Forgery"),
+        (r"\binformation disclosure\b", "Information Disclosure"),
+        (r"\barbitrary file upload\b", "Arbitrary File Upload"),
+        (r"\barbitrary file deletion\b", "Arbitrary File Deletion"),
+        (r"\bopen redirect\b", "Open Redirect"),
+        (r"\buse-after-free\b", "Use-After-Free"),
+        (r"\bbuffer overflow\b", "Buffer Overflow"),
+        (r"\bmemory corruption\b", "Memory Corruption"),
+    )
+    for pattern, label in vulnerability_types:
+        if re.search(pattern, haystack):
+            return label
+    return "Vulnerability"
+
+
+def _humanize_severity(severity: str | None) -> str:
+    if not isinstance(severity, str) or not severity.strip():
+        return "Unknown"
+    return severity.strip().lower().capitalize()
+
+
+def _render_initial_exploitation_status(status: str | None) -> str:
+    normalized = str(status or "").strip().upper()
+    if normalized == "PRESENT":
+        return "Confirmed in the wild"
+    if normalized == "ABSENT":
+        return "No confirmed in-the-wild exploitation"
+    return "Unknown"
+
+
+def _render_initial_binary_status(status: str | None) -> str:
+    normalized = str(status or "").strip().upper()
+    if normalized == "PRESENT":
+        return "Yes"
+    if normalized == "ABSENT":
+        return "No"
+    return "Unknown"
+
+
+def _extract_x_affected_product(
+    raw_payload: Any,
+    *,
+    canonical_vendor_name: str | None,
+    canonical_product_name: str | None,
+) -> str | None:
+    affected_entries = _iter_cve_org_affected_entries(raw_payload)
+    if not affected_entries:
+        return _format_product_name(canonical_vendor_name, canonical_product_name) or None
+
+    preferred_entry = _select_preferred_affected_entry(
+        affected_entries,
+        canonical_product_name=canonical_product_name,
+    )
+    if preferred_entry is None:
+        return _format_product_name(canonical_vendor_name, canonical_product_name) or None
+    return _format_product_name(preferred_entry.get("vendor"), preferred_entry.get("product")) or None
+
+
+def _extract_x_affected_version(raw_payload: Any, *, canonical_product_name: str | None) -> str | None:
+    affected_entries = _iter_cve_org_affected_entries(raw_payload)
+    if not affected_entries:
+        return None
+
+    preferred_entry = _select_preferred_affected_entry(
+        affected_entries,
+        canonical_product_name=canonical_product_name,
+    )
+    candidate_entries = [preferred_entry] if preferred_entry is not None else []
+    candidate_entries.extend(entry for entry in affected_entries if entry is not preferred_entry)
+    for entry in candidate_entries:
+        formatted_versions = _format_affected_versions(entry)
+        if formatted_versions:
+            return "; ".join(formatted_versions[:3])
+    return None
+
+
+def _extract_patch_availability(raw_payload: Any, *, reference_links: dict[str, Any]) -> str:
+    for reference in _iter_cve_org_reference_entries(raw_payload):
+        tags = {str(tag).strip().lower() for tag in reference.get("tags") or ()}
+        if {"patch", "release-notes"} & tags:
+            return "Yes"
+
+    for text in _iter_source_guidance_texts(raw_payload):
+        lowered = text.lower()
+        if any(marker in lowered for marker in ("no fix", "no patch", "no workaround", "not currently available")):
+            return "No"
+        if any(
+            marker in lowered
+            for marker in ("apply the patch", "apply patches", "security update", "fixed in", "upgrade to", "update to", "hotfix")
+        ):
+            return "Yes"
+
+    if isinstance(reference_links, dict) and reference_links.get("vendor"):
+        return "Unknown"
+    return "Unknown"
+
+
+def _extract_source_backed_mitigations(raw_payload: Any) -> list[str]:
+    mitigations: list[str] = []
+    seen: set[str] = set()
+    for source_key, text in _iter_source_guidance_items(raw_payload):
+        normalized = " ".join(text.split())
+        if not normalized:
+            continue
+        lowered = normalized.lower()
+        if _looks_like_patch_guidance(lowered):
+            continue
+        if source_key == "solutions" and not _looks_like_mitigation_guidance(lowered):
+            continue
+        if normalized in seen:
+            continue
+        seen.add(normalized)
+        mitigations.append(normalized)
+        if len(mitigations) >= 3:
+            break
+    return mitigations
+
+
+def _iter_cve_org_affected_entries(raw_payload: Any) -> list[dict[str, Any]]:
+    if not isinstance(raw_payload, dict):
+        return []
+    containers = raw_payload.get("containers")
+    if not isinstance(containers, dict):
+        return []
+
+    affected_entries: list[dict[str, Any]] = []
+    cna = containers.get("cna")
+    if isinstance(cna, dict):
+        affected_entries.extend(_coerce_affected_entries(cna.get("affected")))
+
+    adp_entries = containers.get("adp")
+    if isinstance(adp_entries, list):
+        for adp in adp_entries:
+            if isinstance(adp, dict):
+                affected_entries.extend(_coerce_affected_entries(adp.get("affected")))
+    return affected_entries
+
+
+def _coerce_affected_entries(value: Any) -> list[dict[str, Any]]:
+    if not isinstance(value, list):
+        return []
+
+    affected_entries: list[dict[str, Any]] = []
+    for item in value:
+        if not isinstance(item, dict):
+            continue
+        affected_entries.append(
+            {
+                "vendor": item.get("vendor"),
+                "product": item.get("product"),
+                "default_status": item.get("defaultStatus"),
+                "versions": list(item.get("versions") or ()) if isinstance(item.get("versions"), list) else [],
+            }
+        )
+    return affected_entries
+
+
+def _select_preferred_affected_entry(
+    entries: list[dict[str, Any]],
+    *,
+    canonical_product_name: str | None,
+) -> dict[str, Any] | None:
+    if not entries:
+        return None
+    normalized_canonical = _normalize_product_token(canonical_product_name)
+    if normalized_canonical:
+        for entry in entries:
+            if _normalize_product_token(entry.get("product")) == normalized_canonical:
+                return entry
+    return entries[0]
+
+
+def _format_affected_versions(entry: dict[str, Any]) -> list[str]:
+    default_status = str(entry.get("default_status") or "").strip().lower()
+    formatted_versions: list[str] = []
+    seen: set[str] = set()
+    for version in entry.get("versions") or ():
+        if not isinstance(version, dict):
+            continue
+        formatted = _format_single_affected_version(version, default_status=default_status)
+        if formatted and formatted not in seen:
+            seen.add(formatted)
+            formatted_versions.append(formatted)
+    return formatted_versions
+
+
+def _format_single_affected_version(version: dict[str, Any], *, default_status: str) -> str | None:
+    status = str(version.get("status") or default_status or "").strip().lower()
+    if status and status != "affected":
+        return None
+
+    version_value = str(version.get("version") or "").strip()
+    less_than = str(version.get("lessThan") or "").strip()
+    less_than_or_equal = str(version.get("lessThanOrEqual") or "").strip()
+    changes = version.get("changes")
+
+    if less_than:
+        if version_value and version_value not in {"*", "n/a", "unspecified"}:
+            return f">= {version_value} and < {less_than}"
+        return f"< {less_than}"
+    if less_than_or_equal:
+        if version_value and version_value not in {"*", "n/a", "unspecified"}:
+            return f">= {version_value} and <= {less_than_or_equal}"
+        return f"<= {less_than_or_equal}"
+    if version_value and version_value not in {"*", "n/a", "unspecified"}:
+        return version_value
+    if isinstance(changes, list):
+        for change in changes:
+            if not isinstance(change, dict):
+                continue
+            at_version = str(change.get("at") or "").strip()
+            change_status = str(change.get("status") or "").strip().lower()
+            if at_version and change_status == "unaffected":
+                return f"< {at_version}"
+    return None
+
+
+def _iter_source_guidance_items(raw_payload: Any) -> list[tuple[str, str]]:
+    if not isinstance(raw_payload, dict):
+        return []
+    containers = raw_payload.get("containers")
+    if not isinstance(containers, dict):
+        return []
+
+    guidance_items: list[tuple[str, str]] = []
+    for container in _iter_guidance_containers(containers):
+        for key in ("mitigations", "workarounds", "solutions"):
+            entries = container.get(key)
+            if not isinstance(entries, list):
+                continue
+            for entry in entries:
+                if not isinstance(entry, dict):
+                    continue
+                text = _extract_english_text(entry)
+                if text:
+                    guidance_items.append((key, text))
+    return guidance_items
+
+
+def _iter_source_guidance_texts(raw_payload: Any) -> list[str]:
+    return [text for _, text in _iter_source_guidance_items(raw_payload)]
+
+
+def _iter_guidance_containers(containers: dict[str, Any]) -> list[dict[str, Any]]:
+    values: list[dict[str, Any]] = []
+    cna = containers.get("cna")
+    if isinstance(cna, dict):
+        values.append(cna)
+    adp_entries = containers.get("adp")
+    if isinstance(adp_entries, list):
+        values.extend(entry for entry in adp_entries if isinstance(entry, dict))
+    return values
+
+
+def _extract_english_text(entry: dict[str, Any]) -> str | None:
+    language = str(entry.get("lang") or "").strip().lower().replace("_", "-")
+    if language and language != "en" and not language.startswith("en-"):
+        return None
+    for key in ("value", "text", "description", "details"):
+        value = entry.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    return None
+
+
+def _looks_like_patch_guidance(text: str) -> bool:
+    return any(
+        marker in text
+        for marker in ("apply the patch", "apply patches", "patch now", "update to", "upgrade to", "fixed in", "security update", "install the update")
+    )
+
+
+def _looks_like_mitigation_guidance(text: str) -> bool:
+    return any(
+        marker in text
+        for marker in (
+            "restrict",
+            "disable",
+            "block",
+            "filter",
+            "limit access",
+            "workaround",
+            "mitigat",
+            "temporary",
+            "configuration",
+            "firewall",
+            "segmentation",
+            "network access",
+        )
+    )
+
+
+def _format_product_name(vendor_name: Any, product_name: Any) -> str:
+    vendor = str(vendor_name or "").strip()
+    product = str(product_name or "").strip()
+    if not vendor and not product:
+        return "Unknown"
+    if not vendor:
+        return product
+    if not product:
+        return vendor
+    if vendor.lower() in product.lower():
+        return product
+    return f"{vendor} {product}"
+
+
+def _normalize_product_token(value: Any) -> str:
+    return re.sub(r"[^a-z0-9]+", "", str(value or "").lower())
 
 
 def _build_update_publication_payload_snapshot(
@@ -1088,7 +1480,18 @@ def _get_existing_initial_publish_metadata(session: Session, cve_pk: UUID, *, ta
     payload_snapshot = event.payload_snapshot or {}
     publish_content = payload_snapshot.get("publish_content") or {}
     metadata = publish_content.get("metadata") or {}
-    return dict(metadata) if isinstance(metadata, dict) else {}
+    replay_context = payload_snapshot.get("replay_context") or {}
+    description_compression = replay_context.get("description_compression") or {}
+    merged = dict(metadata) if isinstance(metadata, dict) else {}
+    if isinstance(description_compression, dict):
+        merged.setdefault("description_brief", description_compression.get("description_brief"))
+        merged.setdefault("description_brief_source", description_compression.get("source"))
+        merged.setdefault("description_brief_model_name", description_compression.get("model_name"))
+        merged.setdefault("description_brief_prompt_version", description_compression.get("prompt_version"))
+    x_post = replay_context.get("x_post")
+    if isinstance(x_post, dict):
+        merged.setdefault("x_post", x_post)
+    return merged
 
 
 def _get_cve_org_reference_links(session: Session, cve_pk: UUID) -> dict[str, Any]:

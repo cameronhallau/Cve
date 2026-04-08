@@ -287,6 +287,38 @@ def _build_sections(request: PublishRequest) -> list[str]:
             sections.append(links_section)
         return sections
 
+    x_post = replay_context.get("x_post")
+    if isinstance(x_post, dict) and x_post:
+        reference_links = metadata.get("reference_links")
+        if not isinstance(reference_links, dict):
+            source_references = replay_context.get("source_references") or {}
+            if isinstance(source_references, dict):
+                reference_links = source_references.get("links")
+
+        sections = [
+            _build_initial_header(request.cve_id, x_post),
+            "Description\n" + str(x_post.get("description") or "No description provided."),
+            "\n".join(
+                (
+                    f"Severity: {x_post.get('severity') or 'Unknown'}",
+                    f"Exploitation: {x_post.get('exploitation') or 'Unknown'}",
+                    f"Public PoC: {x_post.get('public_poc') or 'Unknown'}",
+                    f"Patch Available: {x_post.get('patch_available') or 'Unknown'}",
+                    f"Affected Product: {x_post.get('affected_product') or 'Unknown'}",
+                    f"Affected Version: {x_post.get('affected_version') or 'Unknown'}",
+                )
+            ),
+        ]
+
+        mitigations = [str(item).strip() for item in x_post.get("mitigations") or () if str(item).strip()]
+        if mitigations:
+            sections.append("Mitigations\n" + "\n".join(f"- {item}" for item in mitigations))
+
+        links_section = _format_reference_links(reference_links, include_link_suffix=False)
+        if links_section:
+            sections.append("Sources\n" + links_section)
+        return sections
+
     description = ((replay_context.get("cve") or {}).get("description")) or "No description provided."
     classification = replay_context.get("classification") or {}
     classification_details = classification.get("details") or {}
@@ -321,6 +353,12 @@ def _build_sections(request: PublishRequest) -> list[str]:
     return sections
 
 
+def _build_initial_header(cve_id: str, x_post: dict[str, Any]) -> str:
+    primary_product = str(x_post.get("primary_product") or "Unknown Product").strip()
+    vulnerability_type = str(x_post.get("vulnerability_type") or "Vulnerability").strip()
+    return f"{cve_id} | {primary_product} | {vulnerability_type}"
+
+
 def _extract_initial_reply_to_post_id(request: PublishRequest) -> str | None:
     if request.event_type != "UPDATE":
         return None
@@ -351,7 +389,7 @@ def _join_sections(sections: list[str]) -> str:
     return "\n\n".join(normalized_sections)
 
 
-def _format_reference_links(reference_links: Any) -> str | None:
+def _format_reference_links(reference_links: Any, *, include_link_suffix: bool = True) -> str | None:
     if not isinstance(reference_links, dict):
         return None
 
@@ -371,7 +409,8 @@ def _format_reference_links(reference_links: Any) -> str | None:
             else:
                 url = item
             if isinstance(url, str) and url:
-                lines.append(f"{label}: {url}")
+                rendered_label = label if include_link_suffix else label.removesuffix(" Link")
+                lines.append(f"{rendered_label}: {url}")
     return "\n".join(lines) if lines else None
 
 

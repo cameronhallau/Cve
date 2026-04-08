@@ -8,7 +8,7 @@ import httpx
 
 from cve_service.core.config import Settings
 
-PROMPT_VERSION = "phase8-description-compression.v1"
+PROMPT_VERSION = "phase9-description-compression.v1"
 DESCRIPTION_COMPRESSION_SCHEMA = {
     "type": "object",
     "additionalProperties": False,
@@ -16,7 +16,6 @@ DESCRIPTION_COMPRESSION_SCHEMA = {
         "compressed_description": {
             "type": "string",
             "minLength": 1,
-            "maxLength": 280,
         }
     },
     "required": ["compressed_description"],
@@ -134,7 +133,7 @@ def build_description_compressor(
         model=model_name or settings.ai_model,
         base_url=settings.openrouter_base_url,
         timeout_seconds=settings.ai_timeout_seconds,
-        max_completion_tokens=min(settings.ai_max_completion_tokens, 160),
+        max_completion_tokens=min(settings.ai_max_completion_tokens, 300),
         temperature=settings.ai_temperature,
         http_referer=settings.openrouter_http_referer,
         title=settings.openrouter_title,
@@ -146,7 +145,6 @@ def fallback_description_brief(
     description: str | None,
     *,
     canonical_product_name: str | None,
-    limit: int = 180,
 ) -> str:
     normalized = " ".join((description or "").split())
     if not normalized:
@@ -173,24 +171,20 @@ def fallback_description_brief(
     for source, target in replacements:
         normalized = normalized.replace(source, target)
 
-    if len(normalized) <= limit:
-        return normalized.rstrip(".") if normalized.endswith("..") else normalized
-
-    truncated = normalized[:limit].rsplit(" ", 1)[0].rstrip(" ,;:")
-    if not truncated:
-        truncated = normalized[:limit].rstrip()
-    if not truncated.endswith((".", "!", "?")):
-        truncated += "..."
-    return truncated
+    sentences = _split_sentences(normalized)
+    if len(sentences) >= 2:
+        return " ".join(sentences[:2])
+    return normalized.rstrip(".") if normalized.endswith("..") else normalized
 
 
 def _build_messages(request: DescriptionCompressionRequest) -> list[dict[str, str]]:
     system_prompt = (
-        "You compress CVE descriptions for a public security feed. "
+        "You write the Description section for an enterprise security CVE post. "
         "Return only JSON that matches the provided schema. "
-        "Write one sentence in the format 'In <Product>, <how>, resulting in <impact>' when possible. "
-        "Be succinct, prefer common abbreviations like unauth, auth'd, RCE, DoS, OIDC when accurate, "
-        "and keep only product, attack method, and impact."
+        "Write one short paragraph that explains what the vulnerability is, how exploitation works, "
+        "and the affected component, endpoint, or subcomponent when the source text names it. "
+        "Be technically accurate, succinct, and plain-English. "
+        "Prefer common abbreviations like unauth, auth'd, RCE, DoS, and OIDC when accurate."
     )
     user_prompt = json.dumps(
         {
@@ -204,9 +198,9 @@ def _build_messages(request: DescriptionCompressionRequest) -> list[dict[str, st
                 "canonical_product_name": request.canonical_product_name,
             },
             "requirements": {
-                "max_length_hint": 180,
-                "must_include": ["product", "how", "impact"],
-                "must_exclude": ["severity labels", "PoC/ITW status", "reason codes", "remediation"],
+                "must_include": ["vulnerability type or flaw", "exploit method", "impact"],
+                "should_include_when_known": ["affected component", "subcomponent", "endpoint", "feature"],
+                "must_exclude": ["severity labels", "PoC/ITW status", "reason codes", "patch guidance", "recommended actions"],
             },
             "response_schema": DESCRIPTION_COMPRESSION_SCHEMA,
         },
@@ -280,3 +274,9 @@ def _lowercase_first_alpha(text: str) -> str:
         if character.isalpha():
             return text[:index] + character.lower() + text[index + 1 :]
     return text
+
+
+def _split_sentences(text: str) -> list[str]:
+    normalized = text.replace("!", ".").replace("?", ".")
+    sentences = [" ".join(part.split()).strip() for part in normalized.split(".")]
+    return [f"{sentence}." for sentence in sentences if sentence]

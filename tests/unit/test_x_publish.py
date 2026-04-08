@@ -26,22 +26,37 @@ def test_build_x_thread_plan_keeps_long_initial_payload_in_single_post() -> None
 
 def test_build_x_thread_plan_formats_initial_payload_deterministically() -> None:
     request = _initial_request(
-        description="A flaw was found in Keycloak. An unauthenticated attacker can trigger denial of service.",
-        description_brief=(
-            "In Keycloak, an unauth attacker can send a crafted POST request to the OIDC token endpoint, resulting in DoS."
+        description=(
+            "A denial of service vulnerability in Keycloak allows an unauth attacker to send crafted POST requests "
+            "to the OIDC token endpoint and exhaust server resources."
         ),
+        description_brief=(
+            "A denial of service vulnerability in Keycloak allows an unauth attacker to send crafted POST requests "
+            "to the OIDC token endpoint and exhaust server resources."
+        ),
+        primary_product="Keycloak",
+        vulnerability_type="Denial of Service",
+        severity="High",
+        exploitation="No confirmed in-the-wild exploitation",
+        public_poc="Unknown",
+        patch_available="Yes",
+        affected_product="Keycloak",
+        affected_version="< 26.1.4",
     )
 
     posts = build_x_thread_plan(request)
     combined = "\n".join(post.text for post in posts)
 
-    assert combined.startswith("CVE-2026-6100")
-    assert "CVE-2026-6100\n\nIn Keycloak" in combined
-    assert "DoS.\n\nSeverity: Critical" in combined
-    assert "Severity: Critical" in combined
-    assert "PoC: n/a" in combined
-    assert "Exploited: n/a" in combined
-    assert "Product: Microsoft Exchange Server" in combined
+    assert combined.startswith("CVE-2026-6100 | Keycloak | Denial of Service")
+    assert "Description\nA denial of service vulnerability in Keycloak" in combined
+    assert "Severity: High" in combined
+    assert "Exploitation: No confirmed in-the-wild exploitation" in combined
+    assert "Public PoC: Unknown" in combined
+    assert "Patch Available: Yes" in combined
+    assert "Affected Product: Keycloak" in combined
+    assert "Affected Version: < 26.1.4" in combined
+    assert "PoC: n/a" not in combined
+    assert "Exploited: n/a" not in combined
     assert "Summary:" not in combined
     assert "Reasons:" not in combined
     assert "Scope:" not in combined
@@ -72,10 +87,18 @@ def test_build_x_thread_plan_includes_labeled_reference_links_only_when_present(
     posts = build_x_thread_plan(request)
     text = posts[0].text
 
-    assert "Vendor Link: https://vendor.example/advisory" in text
-    assert "Research Link: https://research.example/write-up" in text
-    assert "PoC Link: https://github.com/example/repo/blob/main/poc.py" in text
-    assert "ITW Link:" not in text
+    assert "Sources\nVendor: https://vendor.example/advisory" in text
+    assert "Research: https://research.example/write-up" in text
+    assert "PoC: https://github.com/example/repo/blob/main/poc.py" in text
+    assert "ITW:" not in text
+
+
+def test_build_x_thread_plan_omits_mitigations_section_when_no_source_backed_mitigations_exist() -> None:
+    request = _initial_request()
+
+    posts = build_x_thread_plan(request)
+
+    assert "Mitigations\n" not in posts[0].text
 
 
 def test_x_publish_target_posts_update_threads_as_replies() -> None:
@@ -198,8 +221,20 @@ def test_x_publish_target_requires_baseline_external_id_for_updates() -> None:
 def _initial_request(
     *,
     description: str = "Enterprise Exchange Server RCE with exploit evidence.",
-    description_brief: str = "In Microsoft Exchange Server, an unauth attacker can trigger RCE.",
+    description_brief: str = (
+        "A remote code execution vulnerability in Microsoft Exchange Server allows an unauth attacker "
+        "to send crafted requests to exposed Exchange services and execute code."
+    ),
     reference_links: dict[str, object] | None = None,
+    primary_product: str = "Microsoft Exchange Server",
+    vulnerability_type: str = "Remote Code Execution",
+    severity: str = "Critical",
+    exploitation: str = "Unknown",
+    public_poc: str = "Unknown",
+    patch_available: str = "Unknown",
+    affected_product: str = "Microsoft Exchange Server",
+    affected_version: str = "Unknown",
+    mitigations: list[str] | None = None,
 ) -> PublishRequest:
     return PublishRequest(
         cve_id="CVE-2026-6100",
@@ -219,9 +254,6 @@ def _initial_request(
                 "canonical_name": "Microsoft Exchange Server",
                 "product_scope": "enterprise",
                 "affected_products": ["Microsoft Exchange Server"],
-                "description_brief": description_brief,
-                "description_brief_source": "llm",
-                "description_brief_model_name": "x-ai/grok-4.1-fast",
                 "poc_status": "UNKNOWN",
                 "itw_status": "UNKNOWN",
                 "policy_reason_codes": ["policy.publish.enterprise_candidate_with_poc"],
@@ -241,7 +273,19 @@ def _initial_request(
                     "description_brief": description_brief,
                     "source": "llm",
                     "model_name": "x-ai/grok-4.1-fast",
-                    "prompt_version": "phase8-description-compression.v1",
+                    "prompt_version": "phase9-description-compression.v1",
+                },
+                "x_post": {
+                    "primary_product": primary_product,
+                    "vulnerability_type": vulnerability_type,
+                    "description": description_brief,
+                    "severity": severity,
+                    "exploitation": exploitation,
+                    "public_poc": public_poc,
+                    "patch_available": patch_available,
+                    "affected_product": affected_product,
+                    "affected_version": affected_version,
+                    "mitigations": mitigations or [],
                 },
             }
         },

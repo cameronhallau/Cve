@@ -23,9 +23,20 @@ from cve_service.services.publication import X_PUBLICATION_METRIC_KEY, prepare_u
 from cve_service.services.publish_targets import PublishResponse, PublishTargetError
 
 
-class NeverCalledProvider:
-    def review(self, request):  # pragma: no cover - deterministic candidate never routes to AI
-        raise AssertionError("AI should not be called for deterministic candidates")
+class PublishableProvider:
+    def review(self, request):
+        from cve_service.services.ai_review import AIProviderResponse
+
+        return AIProviderResponse(
+            model_name="mock-gpt",
+            payload={
+                "cve_id": request.request_payload["cve_id"],
+                "enterprise_relevance_assessment": "enterprise_relevant",
+                "exploit_path_assessment": "internet_exploitable",
+                "confidence": 0.96,
+                "reasoning_summary": "Publishable in enterprise deployments.",
+            },
+        )
 
 
 class SuccessfulXTarget:
@@ -274,7 +285,7 @@ def _prepare_publish_pending_cve(session, cve_id: str) -> None:
     result = process_post_enrichment_workflow(
         session,
         cve_id,
-        NeverCalledProvider(),
+        PublishableProvider(),
         requested_at=datetime(2026, 4, 4, 0, 3, tzinfo=UTC),
         evaluated_at=datetime(2026, 4, 4, 0, 3, tzinfo=UTC),
     )

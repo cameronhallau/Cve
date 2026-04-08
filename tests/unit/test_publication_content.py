@@ -271,8 +271,32 @@ def test_prepare_initial_publication_carries_cve_org_reference_links(session_fac
                     "cveMetadata": {"cveId": "CVE-2026-0703"},
                     "containers": {
                         "cna": {
+                            "affected": [
+                                {
+                                    "vendor": "Microsoft",
+                                    "product": "Exchange Server",
+                                    "versions": [
+                                        {
+                                            "version": "2019 CU14",
+                                            "status": "affected",
+                                            "lessThan": "2019 CU15",
+                                        }
+                                    ],
+                                }
+                            ],
+                            "solutions": [
+                                {
+                                    "lang": "en",
+                                    "value": "Restrict external access to Outlook Web Access until mitigations are in place.",
+                                },
+                                {
+                                    "lang": "en",
+                                    "value": "Apply the latest security update from Microsoft.",
+                                },
+                            ],
                             "references": [
                                 {"url": "https://vendor.example/advisory", "tags": ["vendor-advisory"]},
+                                {"url": "https://vendor.example/releases/cu15", "tags": ["patch"]},
                                 {"url": "https://research.example/write-up", "tags": ["technical-description"]},
                                 {"url": "https://github.com/example/repo/blob/main/poc.py", "tags": ["exploit"]},
                             ]
@@ -306,3 +330,9 @@ def test_prepare_initial_publication_carries_cve_org_reference_links(session_fac
         prepared.payload_snapshot["replay_context"]["source_references"]["links"]["vendor"][0]["url"]
         == "https://vendor.example/advisory"
     )
+    assert prepared.payload_snapshot["replay_context"]["x_post"]["patch_available"] == "Yes"
+    assert prepared.payload_snapshot["replay_context"]["x_post"]["affected_product"] == "Microsoft Exchange Server"
+    assert prepared.payload_snapshot["replay_context"]["x_post"]["affected_version"] == ">= 2019 CU14 and < 2019 CU15"
+    assert prepared.payload_snapshot["replay_context"]["x_post"]["mitigations"] == [
+        "Restrict external access to Outlook Web Access until mitigations are in place."
+    ]
