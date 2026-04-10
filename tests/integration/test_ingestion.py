@@ -82,6 +82,31 @@ def test_consumer_only_products_are_denied_and_persist_classifier_trace(session_
     assert cve.state is CveState.SUPPRESSED
 
 
+def test_non_critical_dos_records_are_suppressed_during_ingestion(session_factory) -> None:
+    record = PublicFeedRecord(
+        cve_id="CVE-2026-0003",
+        title="Junos OS denial of service vulnerability",
+        description="A denial of service issue lets remote attackers crash flowd repeatedly.",
+        severity="HIGH",
+        source_name="fixture-feed",
+        source_modified_at=datetime(2026, 4, 2, 3, 0, tzinfo=UTC),
+        vendor_name="Juniper Networks",
+        product_name="Junos OS",
+    )
+
+    with session_scope(session_factory) as session:
+        result = ingest_public_feed_record(session, record)
+        stored = session.get(Classification, result.classification_id)
+        cve = session.scalar(select(CVE).where(CVE.cve_id == record.cve_id))
+
+    assert result.state is CveState.SUPPRESSED
+    assert stored is not None
+    assert stored.outcome is ClassificationOutcome.DENY
+    assert stored.reason_codes == ["classifier.deny.non_critical_denial_of_service"]
+    assert cve is not None
+    assert cve.state is CveState.SUPPRESSED
+
+
 def test_alias_only_rename_reingest_keeps_same_canonical_identity_without_classification_drift(session_factory) -> None:
     initial = PublicFeedRecord(
         cve_id="CVE-2026-0006",

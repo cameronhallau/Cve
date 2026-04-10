@@ -946,14 +946,18 @@ def _build_initial_x_post_context(
         canonical_vendor_name=canonical_vendor_name,
         canonical_product_name=canonical_product_name,
     )
-    return {
+    x_post_context = {
         "primary_product": affected_product or _format_product_name(canonical_vendor_name, canonical_product_name),
         "vulnerability_type": _derive_vulnerability_type(cve.title, cve.description),
         "description": description_brief_metadata.get("description_brief") or "No description provided.",
         "severity": _humanize_severity(cve.severity),
         "exploitation": _render_initial_exploitation_status(cve.itw_status.value),
         "public_poc": public_poc,
-        "patch_available": _extract_patch_availability(raw_payload, reference_links=reference_links),
+        "patch_available": _extract_patch_availability(
+            raw_payload,
+            reference_links=reference_links,
+            source_description=cve.description,
+        ),
         "affected_product": affected_product or "Unknown",
         "affected_version": _extract_x_affected_version(
             raw_payload,
@@ -962,6 +966,13 @@ def _build_initial_x_post_context(
         or "Unknown",
         "mitigations": _extract_source_backed_mitigations(raw_payload),
     }
+    return _refine_initial_x_post_context(
+        x_post_context,
+        raw_payload=raw_payload,
+        title=cve.title,
+        description=cve.description,
+        reference_links=reference_links,
+    )
 
 
 def _reference_category_has_urls(reference_links: dict[str, Any], category: str) -> bool:
@@ -980,8 +991,14 @@ def _reference_category_has_urls(reference_links: dict[str, Any], category: str)
 
 
 def _derive_vulnerability_type(title: str | None, description: str | None) -> str:
-    haystack = " ".join(part for part in (title, description) if part).lower()
+    return _derive_vulnerability_type_from_texts(title, description)
+
+
+def _derive_vulnerability_type_from_texts(*texts: Any) -> str:
+    haystack = " ".join(str(text).strip() for text in texts if isinstance(text, str) and text.strip()).lower()
     vulnerability_types = (
+        (r"\bdefault password\b|\buse of default password\b|\bunchanged (?:high-privileged )?(?:default|initial) password\b", "Default Credentials"),
+        (r"\bldap injection\b", "LDAP Injection"),
         (r"\bremote code execution\b|\brace\b", "Remote Code Execution"),
         (r"\bprivilege escalation\b|\beop\b", "Privilege Escalation"),
         (r"\bdenial of service\b|\bdos\b", "Denial of Service"),
@@ -1065,17 +1082,26 @@ def _extract_x_affected_version(raw_payload: Any, *, canonical_product_name: str
     for entry in candidate_entries:
         formatted_versions = _format_affected_versions(entry)
         if formatted_versions:
-            return "; ".join(formatted_versions[:3])
+            return "; ".join(formatted_versions)
     return None
 
 
-def _extract_patch_availability(raw_payload: Any, *, reference_links: dict[str, Any]) -> str:
+def _extract_patch_availability(
+    raw_payload: Any,
+    *,
+    reference_links: dict[str, Any],
+    source_description: str | None = None,
+) -> str:
     for reference in _iter_cve_org_reference_entries(raw_payload):
         tags = {str(tag).strip().lower() for tag in reference.get("tags") or ()}
         if {"patch", "release-notes"} & tags:
             return "Yes"
 
-    for text in _iter_source_guidance_texts(raw_payload):
+    guidance_texts = list(_iter_source_guidance_texts(raw_payload))
+    if isinstance(source_description, str) and source_description.strip():
+        guidance_texts.insert(0, source_description.strip())
+
+    for text in guidance_texts:
         lowered = text.lower()
         if any(marker in lowered for marker in ("no fix", "no patch", "no workaround", "not currently available")):
             return "No"
@@ -1085,9 +1111,66 @@ def _extract_patch_availability(raw_payload: Any, *, reference_links: dict[str, 
         ):
             return "Yes"
 
+    if _has_versioned_fix_boundary(raw_payload):
+        return "Yes"
+
     if isinstance(reference_links, dict) and reference_links.get("vendor"):
         return "Unknown"
     return "Unknown"
+
+
+def _refine_initial_x_post_context(
+    x_post_context: dict[str, Any],
+    *,
+    raw_payload: Any,
+    title: str | None,
+    description: str | None,
+    reference_links: dict[str, Any],
+) -> dict[str, Any]:
+    refined = dict(x_post_context)
+    secondary_texts = [
+        title,
+        description,
+        *_iter_source_guidance_texts(raw_payload),
+        *_iter_reference_hint_texts(reference_links),
+    ]
+
+    if str(refined.get("vulnerability_type") or "").strip() in {"", "Vulnerability"}:
+        refined["vulnerability_type"] = _derive_vulnerability_type_from_texts(*secondary_texts)
+
+    if str(refined.get("patch_available") or "").strip() in {"", "Unknown"}:
+        refined["patch_available"] = _extract_patch_availability(
+            raw_payload,
+            reference_links=reference_links,
+            source_description=description,
+        )
+
+    return refined
+
+
+def _iter_reference_hint_texts(reference_links: dict[str, Any]) -> list[str]:
+    if not isinstance(reference_links, dict):
+        return []
+
+    values: list[str] = []
+    for items in reference_links.values():
+        if not isinstance(items, list):
+            continue
+        for item in items:
+            if isinstance(item, dict):
+                for key in ("name", "url"):
+                    value = item.get(key)
+                    if isinstance(value, str) and value.strip():
+                        values.append(value.strip())
+    return values
+
+
+def _has_versioned_fix_boundary(raw_payload: Any) -> bool:
+    for entry in _iter_cve_org_affected_entries(raw_payload):
+        for formatted in _format_affected_versions(entry):
+            if " < " in formatted or formatted.startswith("< ") or " <= " in formatted or formatted.startswith("<= "):
+                return True
+    return False
 
 
 def _extract_source_backed_mitigations(raw_payload: Any) -> list[str]:

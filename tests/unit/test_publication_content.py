@@ -386,3 +386,77 @@ def test_prepare_initial_publication_carries_cve_org_reference_links(session_fac
     assert prepared.payload_snapshot["replay_context"]["x_post"]["mitigations"] == [
         "Restrict external access to Outlook Web Access until mitigations are in place."
     ]
+
+
+def test_prepare_initial_publication_refines_x_post_context_with_secondary_pass(session_factory) -> None:
+    from cve_service.services.ai_review import AIProviderResponse
+    from cve_service.core.db import session_scope
+    from cve_service.services.ingestion import PublicFeedRecord, ingest_public_feed_record
+    from cve_service.services.post_enrichment import process_post_enrichment_workflow
+
+    class PublishableProvider:
+        def review(self, request):
+            return AIProviderResponse(
+                model_name="mock-gpt",
+                payload={
+                    "cve_id": request.request_payload["cve_id"],
+                    "enterprise_relevance_assessment": "enterprise_relevant",
+                    "exploit_path_assessment": "internet_exploitable",
+                    "confidence": 0.96,
+                    "reasoning_summary": "Publishable in enterprise deployments.",
+                },
+            )
+
+    with session_scope(session_factory) as session:
+        ingest_public_feed_record(
+            session,
+            PublicFeedRecord(
+                cve_id="CVE-2026-0705",
+                title="OPNsense has an LDAP Injection via Unsanitized Username in Authentication",
+                description=(
+                    "OPNsense prior to 26.1.6 passes the login username directly into an LDAP search filter. "
+                    "An unauthenticated attacker can inject LDAP filter metacharacters to enumerate valid users "
+                    "or bypass group membership restrictions. This vulnerability is fixed in 26.1.6."
+                ),
+                severity="HIGH",
+                source_name="cve.org",
+                source_modified_at=datetime(2026, 4, 2, 23, 0, tzinfo=UTC),
+                vendor_name="OPNsense",
+                product_name="core",
+                raw_payload={
+                    "cveMetadata": {"cveId": "CVE-2026-0705"},
+                    "containers": {
+                        "cna": {
+                            "affected": [
+                                {
+                                    "vendor": "OPNsense",
+                                    "product": "core",
+                                    "versions": [
+                                        {"version": "24.7", "status": "affected", "lessThan": "24.7.12"},
+                                        {"version": "25.1", "status": "affected", "lessThan": "25.1.8"},
+                                        {"version": "25.7", "status": "affected", "lessThan": "25.7.3"},
+                                        {"version": "*", "status": "affected", "lessThan": "26.1.6"},
+                                    ],
+                                }
+                            ],
+                            "references": [
+                                {
+                                    "url": "https://github.com/opnsense/core/security/advisories/GHSA-jpm7-f59c-mp54",
+                                    "tags": ["technical-description"],
+                                }
+                            ],
+                        }
+                    },
+                },
+            ),
+        )
+        process_post_enrichment_workflow(session, "CVE-2026-0705", PublishableProvider())
+
+        prepared = prepare_initial_publication(session, "CVE-2026-0705", target_name="x")
+
+    x_post = prepared.payload_snapshot["replay_context"]["x_post"]
+    assert x_post["vulnerability_type"] == "LDAP Injection"
+    assert x_post["patch_available"] == "Yes"
+    assert x_post["affected_version"] == (
+        ">= 24.7 and < 24.7.12; >= 25.1 and < 25.1.8; >= 25.7 and < 25.7.3; < 26.1.6"
+    )

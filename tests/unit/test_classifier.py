@@ -39,3 +39,33 @@ def test_classifier_fail_closes_ambiguous_products_before_ai() -> None:
         "allowed": True,
         "blocked_reason": None,
     }
+
+
+def test_classifier_denies_non_critical_dos_before_enrichment() -> None:
+    product = canonicalize_product("Juniper Networks", "Junos OS")
+
+    result = classify_record(
+        "HIGH",
+        product,
+        title="Junos OS denial of service issue",
+        description="A denial of service in flowd lets remote attackers crash the process.",
+    )
+
+    assert result.outcome is ClassificationOutcome.DENY
+    assert result.next_state is CveState.SUPPRESSED
+    assert result.reason_codes == ("classifier.deny.non_critical_denial_of_service",)
+    assert result.ai_route_eligible is False
+
+
+def test_classifier_allows_critical_dos_to_continue() -> None:
+    product = canonicalize_product("Juniper Networks", "Junos OS")
+
+    result = classify_record(
+        "CRITICAL",
+        product,
+        title="Junos OS denial of service issue",
+        description="A denial of service in flowd lets remote attackers crash the process.",
+    )
+
+    assert result.outcome is ClassificationOutcome.NEEDS_AI
+    assert result.next_state is CveState.CLASSIFIED

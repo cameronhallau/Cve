@@ -28,6 +28,11 @@ _REGISTRY: dict[str, ReasonCodeDefinition] = {
         title="Consumer Only Product",
         summary="The product matches a consumer-only catalog entry and is denied by deterministic policy.",
     ),
+    "classifier.deny.non_critical_denial_of_service": ReasonCodeDefinition(
+        code="classifier.deny.non_critical_denial_of_service",
+        title="Non-Critical Denial Of Service",
+        summary="Non-critical denial-of-service vulnerabilities are ignored by deterministic policy and suppressed before enrichment.",
+    ),
     "classifier.defer.unsupported_severity": ReasonCodeDefinition(
         code="classifier.defer.unsupported_severity",
         title="Unsupported Severity",

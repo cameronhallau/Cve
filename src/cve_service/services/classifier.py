@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import re
 
 from cve_service.models.enums import ClassificationOutcome, CveState
 from cve_service.services.product_registry import (
@@ -29,11 +30,40 @@ def normalize_severity(value: str | None) -> str | None:
     return value.strip().upper()
 
 
-def classify_record(severity: str | None, product: CanonicalProduct) -> ClassificationResult:
+def classify_record(
+    severity: str | None,
+    product: CanonicalProduct,
+    *,
+    title: str | None = None,
+    description: str | None = None,
+) -> ClassificationResult:
     normalized_severity = normalize_severity(severity)
 
     if product.scope == "consumer_only":
         reason_codes = validate_reason_codes(["classifier.deny.consumer_only_product"])
+        return ClassificationResult(
+            outcome=ClassificationOutcome.DENY,
+            confidence=1.0,
+            reason_codes=tuple(reason_codes),
+            next_state=CveState.SUPPRESSED,
+            ai_route_eligible=False,
+            details={
+                "classifier_version": CLASSIFIER_VERSION,
+                "reason_code_registry_version": REASON_CODE_REGISTRY_VERSION,
+                "product_registry_version": PRODUCT_REGISTRY_VERSION,
+                "product_scope": product.scope,
+                "canonical_vendor_name": product.canonical_vendor_name,
+                "canonical_product_name": product.canonical_product_name,
+                "canonical_name": product.canonical_name,
+                "matched_vendor_alias": product.matched_vendor_alias,
+                "matched_product_alias": product.matched_product_alias,
+                "severity": normalized_severity,
+                "ai_route": {"eligible": False, "allowed": False, "blocked_reason": None},
+            },
+        )
+
+    if _is_non_critical_denial_of_service(normalized_severity, title=title, description=description):
+        reason_codes = validate_reason_codes(["classifier.deny.non_critical_denial_of_service"])
         return ClassificationResult(
             outcome=ClassificationOutcome.DENY,
             confidence=1.0,
@@ -127,3 +157,17 @@ def classify_record(severity: str | None, product: CanonicalProduct) -> Classifi
             "ai_route": {"eligible": False, "allowed": False, "blocked_reason": None},
         },
     )
+
+
+def _is_non_critical_denial_of_service(
+    severity: str | None,
+    *,
+    title: str | None,
+    description: str | None,
+) -> bool:
+    if severity == "CRITICAL":
+        return False
+    haystack = " ".join(part for part in (title, description) if part).lower()
+    if not haystack:
+        return False
+    return bool(re.search(r"\bdenial of service\b|\bdos\b", haystack))

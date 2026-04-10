@@ -276,7 +276,12 @@ def ingest_public_feed_record(
             state=cve.state,
         )
 
-    classification_result = classify_record(record.severity, canonical_product)
+    classification_result = classify_record(
+        record.severity,
+        canonical_product,
+        title=record.title,
+        description=record.description,
+    )
     classification_details = {
         **classification_result.details,
         "reason_codes": list(classification_result.reason_codes),
